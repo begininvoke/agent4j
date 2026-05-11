@@ -7,6 +7,9 @@
     <groupId>ink.icoding.llm</groupId>
     <artifactId>agent4j</artifactId>
     <version>1.0</version>
+    <name>Agent4J</name>
+    <description>A Java-implemented agent development framework</description>
+    <url>https://github.com/onlyGuo/agent4j</url>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
@@ -35,7 +38,7 @@
     <licenses>
         <license>
             <name>GNU General Public License v3.0</name>
-            <url>https://raw.githubusercontent.com/onlyGuo/agent4j/master/LICENSE</url>
+            <url>https://raw.githubusercontent.com/onlyGuo/agent4j/main/LICENSE</url>
         </license>
     </licenses>
 
