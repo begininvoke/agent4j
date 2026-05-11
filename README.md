@@ -1,13 +1,17 @@
 <p align="center">
   <br>
+  <img src="https://img.shields.io/github/stars/onlyGuo/agent4j?style=flat-square&logo=github" alt="Stars">
+  <img src="https://img.shields.io/github/forks/onlyGuo/agent4j?style=flat-square&logo=github" alt="Forks">
+  <img src="https://img.shields.io/github/issues/onlyGuo/agent4j?style=flat-square&logo=github" alt="Issues">
   <img src="https://img.shields.io/badge/Java-17+-orange?style=flat-square&logo=openjdk&logoColor=white" alt="Java 17+">
   <img src="https://img.shields.io/badge/License-GPLv3-blue?style=flat-square" alt="License GPLv3">
-  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?style=flat-square" alt="PRs Welcome">
   <a href="README_CN.md"><img src="https://img.shields.io/badge/语言-中文-red?style=flat-square" alt="中文文档"></a>
   <br><br>
 </p>
 
-<h1 align="center">Agent4j</h1>
+<h1 align="center">
+  <img src="https://img.shields.io/badge/🤖-Agent4j-blueviolet?style=for-the-badge" alt="Agent4j">
+</h1>
 
 <p align="center">
   <b>A Java framework for building LLM-powered intelligent agents</b><br>
@@ -16,6 +20,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#demo">Demo</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
   <a href="#api-reference">API Reference</a> &bull;
   <a href="#built-in-tools--skills">Built-in Tools</a> &bull;
@@ -89,11 +94,22 @@ agent.createSession()
 
 ---
 
+<a name="demo"></a>
+
 ## Demo: AI-Powered Full-Stack Project Generator
 
 `MainTest` demonstrates a real-world scenario: using an agent to **automatically generate a Chrome extension and Spring Boot backend** from a single natural language prompt.
 
+> This demo uses [**MiMo-v2.5-pro**](https://mimo.mi.com/) by Xiaomi as the underlying LLM — a model with strong reasoning and tool-calling capabilities. You can swap in any OpenAI-compatible model by changing the environment variables.
+
 ```java
+// Read model config from environment variables
+String baseURL = System.getenv("BASE_URL");   // e.g. https://token-plan-cn.xiaomimimo.com
+String apiKey  = System.getenv("API_KEY");
+String model   = System.getenv("MODEL");       // e.g. mimo-v2.5-pro
+
+LLMModel llm = LLMModel.create(ModelType.OpenAI, baseURL, model, apiKey);
+
 AgentClient agent = new AgentClient();
 agent.setName("CodeAgent");
 agent.setDescription("A professional full-stack engineer, skilled in Chrome extensions and Spring Boot.");
@@ -504,11 +520,12 @@ ink.icoding.llm
 
 ## License
 
-[GNU General Public License v3.0](https://raw.githubusercontent.com/onlyGuo/agent4j/master/LICENSE)
+[GNU General Public License v3.0](https://raw.githubusercontent.com/onlyGuo/agent4j/main/LICENSE)
 
 ---
 
 <p align="center">
   <sub>Built with Java 17 | Jackson | OkHttp</sub><br>
+  <a href="https://github.com/onlyGuo/agent4j">GitHub</a> &bull;
   <a href="README_CN.md">中文文档</a>
 </p>

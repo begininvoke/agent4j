@@ -1,13 +1,17 @@
 <p align="center">
   <br>
+  <img src="https://img.shields.io/github/stars/onlyGuo/agent4j?style=flat-square&logo=github" alt="Stars">
+  <img src="https://img.shields.io/github/forks/onlyGuo/agent4j?style=flat-square&logo=github" alt="Forks">
+  <img src="https://img.shields.io/github/issues/onlyGuo/agent4j?style=flat-square&logo=github" alt="Issues">
   <img src="https://img.shields.io/badge/Java-17+-orange?style=flat-square&logo=openjdk&logoColor=white" alt="Java 17+">
   <img src="https://img.shields.io/badge/License-GPLv3-blue?style=flat-square" alt="License GPLv3">
-  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?style=flat-square" alt="PRs Welcome">
   <a href="README.md"><img src="https://img.shields.io/badge/Language-English-red?style=flat-square" alt="English"></a>
   <br><br>
 </p>
 
-<h1 align="center">Agent4j</h1>
+<h1 align="center">
+  <img src="https://img.shields.io/badge/🤖-Agent4j-blueviolet?style=for-the-badge" alt="Agent4j">
+</h1>
 
 <p align="center">
   <b>Java 智能体框架 — 让 Java 开发者轻松构建 AI Agent</b><br>
@@ -16,6 +20,7 @@
 
 <p align="center">
   <a href="#快速开始">快速开始</a> &bull;
+  <a href="#演示ai-驱动的全栈项目生成器">演示</a> &bull;
   <a href="#架构设计">架构设计</a> &bull;
   <a href="#api-参考">API 参考</a> &bull;
   <a href="#内置工具与技能">内置工具</a> &bull;
@@ -62,36 +67,13 @@ Agent4j 是一个轻量级 Java 框架，让你只需几行代码就能构建**�
 </dependency>
 ```
 
-### 最简示例
-
-```java
-// 1. 创建 LLM 模型
-LLMModel llm = LLMModel.create(ModelType.OpenAI, "https://api.openai.com", "gpt-4o", "sk-...");
-
-// 2. 创建智能体，加载内置技能
-AgentClient agent = new AgentClient();
-agent.setName("MyAgent");
-agent.setDescription("一个智能助手");
-agent.setModel(llm);
-agent.getSkills().addAll(BuiltInSkills.all());
-
-// 3. 发送指令，流式处理响应
-agent.createSession()
-    .command("列出当前目录下所有 Java 文件")
-    .then(new AgentResultHandler() {
-        public void onMessage(String msg) { System.out.print(msg); }
-        public void onTool(ToolDescriptor tool, ToolStatus status) {
-            System.out.println("[" + status + "] " + tool.getName());
-        }
-    })
-    .error(e -> e.printStackTrace());
-```
-
----
-
 ## 演示：AI 驱动的全栈项目生成器
 
+> 本示例 MainTest 默认使用小米 [MiMo-v2.5-pro](https://mimo.mi.com/) 大模型作为 LLM（推荐 BASE_URL=https://token-plan-cn.xiaomimimo.com，MODEL=mimo-v2.5-pro），你也可以通过环境变量切换为任意 OpenAI 兼容模型。
+
 `MainTest` 展示了一个真实场景：用一条自然语言指令，让智能体**自动生成 Chrome 插件 + Spring Boot 后端项目**。
+
+您可以直接在项目中查看 `MainTest` 的完整实现，或者直接运行它，观察智能体如何一步步完成任务, 以下是`MainTest`的核心代码片段：
 
 ```java
 AgentClient agent = new AgentClient();
@@ -483,32 +465,4 @@ ink.icoding.llm
 │       ├── ToolParam               # 参数基类
 │       ├── ToolDescriptor          # 反射 introspection + JSON Schema 生成
 │       ├── ToolExecutor            # 工具执行策略
-│       ├── ToolStatus              # PREPARING / CALLING / COMPLETED
-│       ├── annotations/
-│       │   ├── @ToolInfo           # 工具元数据
-│       │   └── @Param              # 参数元数据
-│       └── builtin/                # 内置工具与技能
-│           ├── skill/
-│           │   ├── BuiltInSkills   # 内置技能工厂
-│           │   ├── FileSystemSkill
-│           │   ├── CommandExecutionSkill
-│           │   └── OrchestrationSkill
-│           ├── param/              # 工具参数类
-│           ├── *Tool.java          # 工具实现
-│           └── CreatePlanTool / CreateSubAgentTool
-│
-└── MainTest                        # 演示应用
-```
-
----
-
-## 许可证
-
-[GNU General Public License v3.0](https://raw.githubusercontent.com/onlyGuo/agent4j/master/LICENSE)
-
----
-
-<p align="center">
-  <sub>基于 Java 17 | Jackson | OkHttp 构建</sub><br>
-  <a href="README.md">English</a>
-</p>
+│       ├── ToolStatus              |
