@@ -9,6 +9,8 @@
   <br><br>
 </p>
 
+<h1 align="center">Agent4j</h1>
+
 <h1 align="center">
   <img src="https://img.shields.io/badge/🤖-Agent4j-blueviolet?style=for-the-badge" alt="Agent4j">
 </h1>
