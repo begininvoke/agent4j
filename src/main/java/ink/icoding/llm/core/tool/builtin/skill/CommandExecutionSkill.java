@@ -30,6 +30,8 @@ public class CommandExecutionSkill extends Skill {
                 - 优先使用跨平台兼容的命令
                 - 查看文件系统信息时优先使用专用工具而非shell命令
                 - 对于需要管理员权限的操作, 需要明确告知用户
+                - 执行命令时, 建议先试用 cd 切换到目标目录, 确保命令在正确的上下文中执行.
+                - 如果命令中需要用到路径, 且你知道全路径, 直接使用全路径执行命令可以避免环境变量问题.
 
                 ### 常用命令参考
                 - 查看当前目录: `pwd` (Unix) / `Get-Location` (PowerShell)

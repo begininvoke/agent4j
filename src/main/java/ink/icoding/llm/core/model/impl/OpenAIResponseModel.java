@@ -15,6 +15,7 @@ import ink.icoding.llm.core.tool.ToolExecutor;
 import ink.icoding.llm.core.tool.ToolParam;
 import ink.icoding.llm.core.tool.ToolStatus;
 import okhttp3.*;
+import okhttp3.internal.http2.StreamResetException;
 import okhttp3.sse.EventSource;
 import okhttp3.sse.EventSourceListener;
 import okhttp3.sse.EventSources;
@@ -110,6 +111,7 @@ public class OpenAIResponseModel implements LLMModel {
                 private String currentToolName;
                 private final StringBuilder toolArgsBuffer = new StringBuilder();
                 private final StringBuilder contentBuffer = new StringBuilder();
+                private final StringBuilder thinkBuffer = new StringBuilder();
                 private final List<ToolCallEntry> toolCalls = new ArrayList<>();
                 private boolean isCompleted;
 
@@ -128,6 +130,7 @@ public class OpenAIResponseModel implements LLMModel {
                             }
                             case "response.output_text.done" -> {}
                             case "response.reasoning_text.delta", "response.reasoning_content.delta", "response.reasoning.delta" -> {
+                                thinkBuffer.append(json.get("delta").asText());
                                 ResultHandler handler = result.getHandler();
                                 if (handler != null) handler.onThink(json.get("delta").asText());
                             }
@@ -149,7 +152,8 @@ public class OpenAIResponseModel implements LLMModel {
                             case "response.completed" -> {
                                 eventSource.cancel();
                                 if (!toolCalls.isEmpty()) {
-                                    handleToolCallsAndContinue(result, messages, tools, toolExecutor, toolCalls);
+                                    handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                                            contentBuffer.toString(), thinkBuffer.toString(), toolCalls);
                                 } else {
                                     result.complete(contentBuffer.toString());
                                 }
@@ -166,6 +170,19 @@ public class OpenAIResponseModel implements LLMModel {
 
                 @Override
                 public void onFailure(EventSource eventSource, Throwable t, Response response) {
+                    if (t instanceof StreamResetException){
+                        // 连接被重置, 可能是模型生成完成后主动断开连接的正常行为
+                        if (!isCompleted) {
+                            isCompleted = true;
+                            if (!toolCalls.isEmpty()) {
+                                handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                                        contentBuffer.toString(), thinkBuffer.toString(), toolCalls);
+                            } else {
+                                result.complete(contentBuffer.toString());
+                            }
+                        }
+                        return;
+                    }
                     String errMsg = "SSE connection failed";
                     if (response != null) {
                         errMsg = "HTTP " + response.code();
@@ -192,8 +209,19 @@ public class OpenAIResponseModel implements LLMModel {
      */
     private void handleToolCallsAndContinue(LLMResult result, List<Message> messages,
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
-                                             List<ToolCallEntry> toolCalls) {
+                                             String content, String think, List<ToolCallEntry> toolCalls) {
         try {
+            if ((content != null && !content.isEmpty()) || (think != null && !think.isEmpty())) {
+                Message assistantMessage = Message.fromAssistant();
+                if (content != null && !content.isEmpty()) {
+                    assistantMessage.appendContent(content);
+                }
+                if (think != null && !think.isEmpty()) {
+                    assistantMessage.appendThink(think);
+                }
+                messages.add(assistantMessage);
+            }
+
             // 执行每个工具调用并添加function_call_output
             for (ToolCallEntry entry : toolCalls) {
                 ToolDescriptor descriptor = ToolDescriptor.fromTool(toolMap.get(entry.toolName));
@@ -236,18 +264,17 @@ public class OpenAIResponseModel implements LLMModel {
 
         ArrayNode inputArray = MAPPER.createArrayNode();
         for (Message msg : messages) {
-            // 检查是否是工具结果消息(function_call_output)
-            if (msg.getContent() != null && msg.getContent().contains("\"type\":\"function_call_output\"")) {
+            if (msg.getContent() != null && msg.getContent().startsWith("{")) {
                 try {
                     JsonNode parsed = MAPPER.readTree(msg.getContent());
-                    inputArray.add(parsed);
-                } catch (Exception e) {
-                    // 回退为普通文本消息
-                    inputArray.add(buildTextItem(msg));
+                    if (parsed.has("role") || parsed.has("type")) {
+                        inputArray.add(parsed);
+                        continue;
+                    }
+                } catch (Exception ignored) {
                 }
-            } else {
-                inputArray.add(buildTextItem(msg));
             }
+            inputArray.add(buildTextItem(msg));
         }
         body.set("input", inputArray);
 
@@ -274,12 +301,16 @@ public class OpenAIResponseModel implements LLMModel {
     private ObjectNode buildTextItem(Message msg) {
         ObjectNode item = MAPPER.createObjectNode();
         item.put("role", msg.getRole().name());
+        if (isMiMoModel() && msg.getRole() == Message.Role.assistant && msg.getThink() != null && !msg.getThink().isEmpty()) {
+            item.put("reasoning_content", msg.getThink());
+        }
+        String textType = msg.getRole() == Message.Role.assistant ? "output_text" : "input_text";
 
         if (msg.getAttachments() != null && !msg.getAttachments().isEmpty()) {
             ArrayNode contentArray = MAPPER.createArrayNode();
             if (msg.getContent() != null) {
                 ObjectNode textPart = MAPPER.createObjectNode();
-                textPart.put("type", "input_text");
+                textPart.put("type", textType);
                 textPart.put("text", msg.getContent());
                 contentArray.add(textPart);
             }
@@ -293,10 +324,12 @@ public class OpenAIResponseModel implements LLMModel {
             item.set("content", contentArray);
         } else {
             ArrayNode contentArray = MAPPER.createArrayNode();
-            ObjectNode textPart = MAPPER.createObjectNode();
-            textPart.put("type", "input_text");
-            textPart.put("text", msg.getContent());
-            contentArray.add(textPart);
+            if (msg.getContent() != null) {
+                ObjectNode textPart = MAPPER.createObjectNode();
+                textPart.put("type", textType);
+                textPart.put("text", msg.getContent());
+                contentArray.add(textPart);
+            }
             item.set("content", contentArray);
         }
         return item;
@@ -311,5 +344,9 @@ public class OpenAIResponseModel implements LLMModel {
         if (errorHandler != null) {
             errorHandler.accept(t instanceof Exception ? (Exception) t : new RuntimeException(t));
         }
+    }
+
+    private boolean isMiMoModel() {
+        return modelName != null && modelName.regionMatches(true, 0, "MiMo", 0, 4);
     }
 }

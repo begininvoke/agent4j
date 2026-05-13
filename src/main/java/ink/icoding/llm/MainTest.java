@@ -16,7 +16,7 @@ public class MainTest {
         String apiKey = System.getenv("API_KEY");
         String model = System.getenv("MODEL");
 
-        LLMModel llm = LLMModel.create(ModelType.OpenAI, baseURL, model, apiKey);
+        LLMModel llm = LLMModel.create(ModelType.Anthropic, baseURL + "/anthropic", model, apiKey);
 
         AgentClient agent = new AgentClient();
         agent.setName("CodeAgent");

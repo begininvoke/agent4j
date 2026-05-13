@@ -257,6 +257,12 @@ public class OpenAIChatModel implements LLMModel {
             } else {
                 assistantMsg.putNull("content");
             }
+            if (think != null && !think.isEmpty()) {
+                if (isMiMoModel()){
+                    // MiMo模型的上下文中带上reasoning字段
+                    assistantMsg.put("reasoning_content", think);
+                }
+            }
             ArrayNode toolCallsArray = MAPPER.createArrayNode();
             for (int i = 0; i < toolCalls.size(); i++) {
                 ToolCallEntry entry = toolCalls.get(i);
@@ -330,6 +336,9 @@ public class OpenAIChatModel implements LLMModel {
 
             ObjectNode msgNode = MAPPER.createObjectNode();
             msgNode.put("role", msg.getRole().name());
+            if (isMiMoModel() && msg.getRole() == Message.Role.assistant && msg.getThink() != null && !msg.getThink().isEmpty()) {
+                msgNode.put("reasoning_content", msg.getThink());
+            }
 
             if (msg.getAttachments() != null && !msg.getAttachments().isEmpty()) {
                 ArrayNode contentArray = MAPPER.createArrayNode();
@@ -379,5 +388,9 @@ public class OpenAIChatModel implements LLMModel {
         if (errorHandler != null) {
             errorHandler.accept(t instanceof Exception ? (Exception) t : new RuntimeException(t));
         }
+    }
+
+    private boolean isMiMoModel() {
+        return modelName != null && modelName.regionMatches(true, 0, "MiMo", 0, 4);
     }
 }

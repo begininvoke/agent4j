@@ -65,7 +65,7 @@ Agent4j is a lightweight Java framework that lets you build **autonomous AI agen
 <dependency>
     <groupId>ink.icoding.llm</groupId>
     <artifactId>agent4j</artifactId>
-    <version>1.0</version>
+    <version>1.1</version>
 </dependency>
 ```
 

@@ -15,6 +15,7 @@ import ink.icoding.llm.core.tool.ToolExecutor;
 import ink.icoding.llm.core.tool.ToolParam;
 import ink.icoding.llm.core.tool.ToolStatus;
 import okhttp3.*;
+import okhttp3.internal.http2.StreamResetException;
 import okhttp3.sse.EventSource;
 import okhttp3.sse.EventSourceListener;
 import okhttp3.sse.EventSources;
@@ -112,6 +113,8 @@ public class AnthropicModel implements LLMModel {
                 private String currentToolName;
                 private final StringBuilder toolInputBuffer = new StringBuilder();
                 private final StringBuilder contentBuffer = new StringBuilder();
+                private final StringBuilder thinkBuffer = new StringBuilder();
+                private final StringBuilder thinkSignatureBuffer = new StringBuilder();
                 private final List<ToolCallEntry> toolCalls = new ArrayList<>();
                 private String stopReason;
 
@@ -130,6 +133,8 @@ public class AnthropicModel implements LLMModel {
                                         currentToolId = contentBlock.get("id").asText();
                                         currentToolName = contentBlock.get("name").asText();
                                         toolInputBuffer.setLength(0);
+                                    } else if ("thinking".equals(currentBlockType) && contentBlock.has("signature")) {
+                                        thinkSignatureBuffer.append(contentBlock.get("signature").asText());
                                     }
                                 }
                             }
@@ -140,7 +145,14 @@ public class AnthropicModel implements LLMModel {
                                     ResultHandler handler = result.getHandler();
                                     switch (deltaType) {
                                         case "thinking_delta" -> {
-                                            if (handler != null) handler.onThink(delta.get("thinking").asText());
+                                            String thinking = delta.get("thinking").asText();
+                                            thinkBuffer.append(thinking);
+                                            if (handler != null) handler.onThink(thinking);
+                                        }
+                                        case "signature_delta" -> {
+                                            if (delta.has("signature")) {
+                                                thinkSignatureBuffer.append(delta.get("signature").asText());
+                                            }
                                         }
                                         case "text_delta" -> {
                                             String text = delta.get("text").asText();
@@ -173,7 +185,8 @@ public class AnthropicModel implements LLMModel {
                                 eventSource.cancel();
                                 if ("tool_use".equals(stopReason) && !toolCalls.isEmpty()) {
                                     handleToolCallsAndContinue(result, messages, tools, toolExecutor,
-                                            contentBuffer.toString(), toolCalls);
+                                            contentBuffer.toString(), thinkBuffer.toString(),
+                                            thinkSignatureBuffer.toString(), toolCalls);
                                 } else {
                                     result.complete(contentBuffer.toString());
                                 }
@@ -190,6 +203,11 @@ public class AnthropicModel implements LLMModel {
 
                 @Override
                 public void onFailure(EventSource eventSource, Throwable t, Response response) {
+                    if (t instanceof StreamResetException) {
+                        // 连接被重置, 可能是模型主动关闭连接, 视为正常结束, 直接返回当前内容
+                        result.complete(contentBuffer.toString());
+                        return;
+                    }
                     String errMsg = "SSE connection failed";
                     if (response != null) {
                         errMsg = "HTTP " + response.code();
@@ -200,7 +218,7 @@ public class AnthropicModel implements LLMModel {
                     } else if (t != null) {
                         errMsg = t.getMessage();
                     }
-                    handleError(result, new RuntimeException(errMsg));
+                    handleError(result, new RuntimeException(errMsg, t));
                 }
 
                 @Override
@@ -216,10 +234,11 @@ public class AnthropicModel implements LLMModel {
      */
     private void handleToolCallsAndContinue(LLMResult result, List<Message> messages,
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
-                                             String content, List<ToolCallEntry> toolCalls) {
+                                             String content, String think, String thinkSignature,
+                                             List<ToolCallEntry> toolCalls) {
         try {
             // 添加assistant消息
-            messages.add(Message.fromAssistant(buildAssistantMessage(content, toolCalls)));
+            messages.add(Message.fromAssistant(buildAssistantMessage(content, think, thinkSignature, toolCalls)));
 
             // 执行每个工具调用
             List<String> toolResults = new ArrayList<>();
@@ -245,10 +264,21 @@ public class AnthropicModel implements LLMModel {
     /**
      * 构建assistant消息JSON.
      */
-    private String buildAssistantMessage(String content, List<ToolCallEntry> toolCalls) {
+    private String buildAssistantMessage(String content, String think, String thinkSignature, List<ToolCallEntry> toolCalls) {
         ObjectNode msg = MAPPER.createObjectNode();
         msg.put("role", "assistant");
         ArrayNode contentArray = MAPPER.createArrayNode();
+        if ((isMiMoModel() && think != null && !think.isEmpty()) || (thinkSignature != null && !thinkSignature.isEmpty())) {
+            ObjectNode thinkBlock = MAPPER.createObjectNode();
+            thinkBlock.put("type", "thinking");
+            if (think != null && !think.isEmpty()) {
+                thinkBlock.put("thinking", think);
+            }
+            if (thinkSignature != null && !thinkSignature.isEmpty()) {
+                thinkBlock.put("signature", thinkSignature);
+            }
+            contentArray.add(thinkBlock);
+        }
         if (content != null && !content.isEmpty()) {
             ObjectNode textBlock = MAPPER.createObjectNode();
             textBlock.put("type", "text");
@@ -327,8 +357,16 @@ public class AnthropicModel implements LLMModel {
             ObjectNode msgNode = MAPPER.createObjectNode();
             msgNode.put("role", msg.getRole() == Message.Role.tool ? "user" : msg.getRole().name());
 
-            if (msg.getAttachments() != null && !msg.getAttachments().isEmpty()) {
+            boolean includeThinking = isMiMoModel() && msg.getRole() == Message.Role.assistant
+                    && msg.getThink() != null && !msg.getThink().isEmpty();
+            if (includeThinking || (msg.getAttachments() != null && !msg.getAttachments().isEmpty())) {
                 ArrayNode contentArray = MAPPER.createArrayNode();
+                if (includeThinking) {
+                    ObjectNode thinkPart = MAPPER.createObjectNode();
+                    thinkPart.put("type", "thinking");
+                    thinkPart.put("thinking", msg.getThink());
+                    contentArray.add(thinkPart);
+                }
                 if (msg.getContent() != null) {
                     ObjectNode textPart = MAPPER.createObjectNode();
                     textPart.put("type", "text");
@@ -373,5 +411,9 @@ public class AnthropicModel implements LLMModel {
         if (errorHandler != null) {
             errorHandler.accept(t instanceof Exception ? (Exception) t : new RuntimeException(t));
         }
+    }
+
+    private boolean isMiMoModel() {
+        return modelName != null && modelName.regionMatches(true, 0, "MiMo", 0, 4);
     }
 }
