@@ -43,6 +43,10 @@ Agent4j is a lightweight Java framework that lets you build **autonomous AI agen
 - **Call any LLM** including OpenAI, Anthropic, and OpenAI-compatible APIs
 - **Stream responses in real-time** via SSE (Server-Sent Events)
 
+<p align="center">
+  <img src="doc/architecture.png" alt="Agent4j Architecture" width="800">
+</p>
+
 ### Why Agent4j?
 
 | Feature | Description |

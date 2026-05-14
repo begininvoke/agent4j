@@ -43,6 +43,10 @@ Agent4j 是一个轻量级 Java 框架，让你只需几行代码就能构建**�
 - **对接任意 LLM** — 支持 OpenAI、Anthropic 及所有 OpenAI 兼容 API
 - **实时流式输出** — 基于 SSE 的流式响应，回调式渲染
 
+<p align="center">
+  <img src="doc/architecture.png" alt="Agent4j 架构图" width="800">
+</p>
+
 ### 为什么选择 Agent4j？
 
 | 特性 | 说明 |
