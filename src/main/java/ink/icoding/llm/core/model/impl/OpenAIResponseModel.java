@@ -15,6 +15,7 @@ import ink.icoding.llm.core.tool.ToolExecutor;
 import ink.icoding.llm.core.tool.ToolParam;
 import ink.icoding.llm.core.tool.ToolStatus;
 import okhttp3.*;
+import okhttp3.internal.http2.ErrorCode;
 import okhttp3.internal.http2.StreamResetException;
 import okhttp3.sse.EventSource;
 import okhttp3.sse.EventSourceListener;
@@ -22,6 +23,7 @@ import okhttp3.sse.EventSources;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * OpenAI Responses API模型实现.
@@ -113,7 +115,20 @@ public class OpenAIResponseModel implements LLMModel {
                 private final StringBuilder contentBuffer = new StringBuilder();
                 private final StringBuilder thinkBuffer = new StringBuilder();
                 private final List<ToolCallEntry> toolCalls = new ArrayList<>();
-                private boolean isCompleted;
+                private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+                private final AtomicBoolean turnHandled = new AtomicBoolean(false);
+
+                private void finishCurrentTurn() {
+                    if (!turnHandled.compareAndSet(false, true)) {
+                        return;
+                    }
+                    if (!toolCalls.isEmpty()) {
+                        handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                                contentBuffer.toString(), thinkBuffer.toString(), new ArrayList<>(toolCalls));
+                    } else {
+                        result.complete(contentBuffer.toString());
+                    }
+                }
 
                 @Override
                 public void onEvent(EventSource eventSource, String id, String type, String data) {
@@ -150,13 +165,9 @@ public class OpenAIResponseModel implements LLMModel {
                                 toolCalls.add(entry);
                             }
                             case "response.completed" -> {
+                                cancelRequested.set(true);
                                 eventSource.cancel();
-                                if (!toolCalls.isEmpty()) {
-                                    handleToolCallsAndContinue(result, messages, tools, toolExecutor,
-                                            contentBuffer.toString(), thinkBuffer.toString(), toolCalls);
-                                } else {
-                                    result.complete(contentBuffer.toString());
-                                }
+                                finishCurrentTurn();
                             }
                             case "error" -> {
                                 String errorMsg = json.has("message") ? json.get("message").asText() : "Unknown error";
@@ -171,16 +182,10 @@ public class OpenAIResponseModel implements LLMModel {
                 @Override
                 public void onFailure(EventSource eventSource, Throwable t, Response response) {
                     if (t instanceof StreamResetException){
-                        // 连接被重置, 可能是模型生成完成后主动断开连接的正常行为
-                        if (!isCompleted) {
-                            isCompleted = true;
-                            if (!toolCalls.isEmpty()) {
-                                handleToolCallsAndContinue(result, messages, tools, toolExecutor,
-                                        contentBuffer.toString(), thinkBuffer.toString(), toolCalls);
-                            } else {
-                                result.complete(contentBuffer.toString());
-                            }
+                        if (isClientCancelledStream(t) && cancelRequested.get()) {
+                            return;
                         }
+                        finishCurrentTurn();
                         return;
                     }
                     String errMsg = "SSE connection failed";
@@ -344,6 +349,11 @@ public class OpenAIResponseModel implements LLMModel {
         if (errorHandler != null) {
             errorHandler.accept(t instanceof Exception ? (Exception) t : new RuntimeException(t));
         }
+    }
+
+    private static boolean isClientCancelledStream(Throwable t) {
+        return t instanceof StreamResetException
+                && ((StreamResetException) t).errorCode == ErrorCode.CANCEL;
     }
 
     private boolean isMiMoModel() {

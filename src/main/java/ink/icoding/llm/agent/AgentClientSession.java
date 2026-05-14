@@ -41,6 +41,8 @@ import java.util.stream.Collectors;
 public class AgentClientSession {
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    private static final int MAX_HISTORY_ROUNDS = 100;
+    private static final int CONTEXT_ROUNDS = 10;
 
     private final AgentClient agent;
     private final List<Message> history = new ArrayList<>();
@@ -87,25 +89,25 @@ public class AgentClientSession {
 
     /**
      * 执行指令, 调用底层LLM并处理响应.
+     * 自动压缩历史: 只发送最近{@value #CONTEXT_ROUNDS}轮用户可见对话给LLM.
      *
      * @param result 会话结果对象
      */
     private void executeCommand(AgentSessionResult result) {
-        List<Message> messages = buildMessages();
+        List<Message> messages = buildMessages(compressHistory(history, CONTEXT_ROUNDS));
         List<Tool> allTools = getAllTools();
 
         ToolExecutor toolExecutor = createToolExecutor(result);
+        Message assistantMessage = Message.fromAssistant();
 
         try {
             LLMResult llmResult = agent.getModel().ask(messages, allTools, toolExecutor);
 
             // 先设handler, 再execute, 确保错误不会丢失
             llmResult.then(new ResultHandler() {
-                private final StringBuilder responseBuffer = new StringBuilder();
-
                 @Override
                 public void onMessage(String msg) {
-                    responseBuffer.append(msg);
+                    assistantMessage.appendContent(msg);
                     if (result.getHandler() != null) {
                         result.getHandler().onMessage(msg);
                     }
@@ -113,6 +115,7 @@ public class AgentClientSession {
 
                 @Override
                 public void onThink(String think) {
+                    assistantMessage.appendThink(think);
                     if (result.getHandler() != null) {
                         result.getHandler().onThink(think);
                     }
@@ -136,11 +139,20 @@ public class AgentClientSession {
 
             // 阻塞等待LLM完成(包含Agent循环)
             String response = llmResult.get();
+            if ((assistantMessage.getContent() == null || assistantMessage.getContent().isEmpty())
+                    && response != null && !response.isEmpty()) {
+                assistantMessage.appendContent(response);
+            }
+            if ((assistantMessage.getContent() != null && !assistantMessage.getContent().isEmpty())
+                    || (assistantMessage.getThink() != null && !assistantMessage.getThink().isEmpty())) {
+                history.add(assistantMessage);
+            }
+            trimHistory();
             result.complete(response);
         } catch (Exception e) {
             result.completeExceptionally(e);
             if (result.getErrorHandler() != null) {
-                result.getErrorHandler().accept(e instanceof Exception ? (Exception) e : new RuntimeException(e));
+                result.getErrorHandler().accept(e);
             }
         }
     }
@@ -345,11 +357,12 @@ public class AgentClientSession {
     }
 
     /**
-     * 构建发送给LLM的消息列表, 包含系统提示和对话历史.
+     * 构建发送给LLM的消息列表, 包含系统提示和指定的对话消息.
      *
+     * @param contextMessages 要包含的对话消息
      * @return 消息列表
      */
-    private List<Message> buildMessages() {
+    private List<Message> buildMessages(List<Message> contextMessages) {
         List<Message> messages = new ArrayList<>();
 
         StringBuilder systemPrompt = new StringBuilder();
@@ -382,9 +395,91 @@ public class AgentClientSession {
 
         Message systemMsg = Message.fromUser(systemPrompt.toString());
         messages.add(systemMsg);
-        messages.addAll(history);
+        messages.addAll(contextMessages);
 
         return messages;
+    }
+
+    /**
+     * 压缩对话历史为用户可见的轮次.
+     * <p>每一轮 = 一条用户消息 + 该轮AI最终输出文本.
+     * 工具调用链(无论多少次)整体算作一轮的中间过程, 不保留.</p>
+     *
+     * @param src   原始历史
+     * @param limit 最多保留的轮数
+     * @return 压缩后的消息列表
+     */
+    private List<Message> compressHistory(List<Message> src, int limit) {
+        List<List<Message>> rounds = new ArrayList<>();
+        List<Message> currentRound = new ArrayList<>();
+        List<Message> assistantBuffer = new ArrayList<>();
+
+        for (Message msg : src) {
+            if (msg.getRole() == Message.Role.tool) {
+                continue;
+            }
+            if (msg.getRole() == Message.Role.user) {
+                if (!assistantBuffer.isEmpty()) {
+                    currentRound.add(assistantBuffer.get(assistantBuffer.size() - 1));
+                    assistantBuffer.clear();
+                }
+                if (!currentRound.isEmpty()) {
+                    rounds.add(currentRound);
+                    currentRound = new ArrayList<>();
+                }
+                currentRound.add(msg);
+            } else if (msg.getRole() == Message.Role.assistant) {
+                assistantBuffer.add(msg);
+            }
+        }
+
+        if (!assistantBuffer.isEmpty()) {
+            currentRound.add(assistantBuffer.get(assistantBuffer.size() - 1));
+        }
+        if (!currentRound.isEmpty()) {
+            rounds.add(currentRound);
+        }
+
+        List<List<Message>> kept = rounds.size() <= limit
+                ? rounds
+                : rounds.subList(rounds.size() - limit, rounds.size());
+
+        List<Message> result = new ArrayList<>();
+        for (List<Message> round : kept) {
+            for (Message msg : round) {
+                Message copy = new Message();
+                copy.setRole(msg.getRole());
+                copy.setContent(msg.getContent());
+                copy.setThink(msg.getThink());
+                if (msg.getAttachments() != null && !msg.getAttachments().isEmpty()) {
+                    copy.setAttachments(new ArrayList<>(msg.getAttachments()));
+                }
+                result.add(copy);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 裁剪历史, 保留最近{@value #MAX_HISTORY_ROUNDS}轮用户可见对话.
+     * <p>超出轮数的早期消息将被移除, 释放内存.</p>
+     */
+    private void trimHistory() {
+        int roundCount = 0;
+        int cutIndex = -1;
+        for (int i = history.size() - 1; i >= 0; i--) {
+            Message msg = history.get(i);
+            if (msg.getRole() == Message.Role.user) {
+                roundCount++;
+                if (roundCount > MAX_HISTORY_ROUNDS) {
+                    cutIndex = i;
+                    break;
+                }
+            }
+        }
+        if (cutIndex > 0) {
+            history.subList(0, cutIndex).clear();
+        }
     }
 
     /**
@@ -470,11 +565,11 @@ public class AgentClientSession {
         allTools.add(createSubAgentTool);
         // 添加技能中的工具, 跳过已存在的同名工具
         java.util.Set<String> names = new java.util.HashSet<>();
-        for (Tool t : allTools) {
+        for (Tool<?> t : allTools) {
             names.add(ink.icoding.llm.core.tool.ToolDescriptor.fromTool(t).getName());
         }
         for (Skill skill : agent.getSkills()) {
-            for (Tool t : skill.getTools()) {
+            for (Tool<?> t : skill.getTools()) {
                 String name = ink.icoding.llm.core.tool.ToolDescriptor.fromTool(t).getName();
                 if (names.add(name)) {
                     allTools.add(t);

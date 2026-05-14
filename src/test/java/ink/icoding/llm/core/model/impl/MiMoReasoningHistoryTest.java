@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import ink.icoding.llm.core.entity.Message;
+import okhttp3.internal.http2.ErrorCode;
+import okhttp3.internal.http2.StreamResetException;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -72,6 +74,25 @@ class MiMoReasoningHistoryTest {
     }
 
     @Test
+    void anthropicStreamResetCancelIsTreatedAsClientCancellation() throws Exception {
+        Method method = AnthropicModel.class.getDeclaredMethod("isClientCancelledStream", Throwable.class);
+        method.setAccessible(true);
+
+        assertTrue((Boolean) method.invoke(null, new StreamResetException(ErrorCode.CANCEL)));
+        assertFalse((Boolean) method.invoke(null, new StreamResetException(ErrorCode.INTERNAL_ERROR)));
+    }
+
+    @Test
+    void anthropicToolUseStopReasonStillRequiresContinuation() throws Exception {
+        Method method = AnthropicModel.class.getDeclaredMethod("shouldContinueWithToolCalls", String.class, List.class);
+        method.setAccessible(true);
+
+        assertTrue((Boolean) method.invoke(null, "tool_use", List.of(new Object())));
+        assertFalse((Boolean) method.invoke(null, "end_turn", List.of(new Object())));
+        assertFalse((Boolean) method.invoke(null, "tool_use", List.of()));
+    }
+
+    @Test
     void openAIChatRequestIncludesAssistantThinkingForMiMo() throws Exception {
         OpenAIChatModel model = new OpenAIChatModel("https://example.com", "mimo-v2.5-pro", "test-key");
         Method method = OpenAIChatModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
@@ -110,6 +131,15 @@ class MiMoReasoningHistoryTest {
 
         assertFalse(item.has("reasoning_content"));
         assertEquals("output_text", item.get("content").get(0).get("type").asText());
+    }
+
+    @Test
+    void openAIResponseStreamResetCancelIsTreatedAsClientCancellation() throws Exception {
+        Method method = OpenAIResponseModel.class.getDeclaredMethod("isClientCancelledStream", Throwable.class);
+        method.setAccessible(true);
+
+        assertTrue((Boolean) method.invoke(null, new StreamResetException(ErrorCode.CANCEL)));
+        assertFalse((Boolean) method.invoke(null, new StreamResetException(ErrorCode.REFUSED_STREAM)));
     }
 }
 

@@ -12,9 +12,8 @@ import ink.icoding.llm.core.model.ResultHandler;
 import ink.icoding.llm.core.tool.Tool;
 import ink.icoding.llm.core.tool.ToolDescriptor;
 import ink.icoding.llm.core.tool.ToolExecutor;
-import ink.icoding.llm.core.tool.ToolParam;
-import ink.icoding.llm.core.tool.ToolStatus;
 import okhttp3.*;
+import okhttp3.internal.http2.ErrorCode;
 import okhttp3.internal.http2.StreamResetException;
 import okhttp3.sse.EventSource;
 import okhttp3.sse.EventSourceListener;
@@ -22,6 +21,7 @@ import okhttp3.sse.EventSources;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Anthropic Messages API模型实现.
@@ -117,6 +117,21 @@ public class AnthropicModel implements LLMModel {
                 private final StringBuilder thinkSignatureBuffer = new StringBuilder();
                 private final List<ToolCallEntry> toolCalls = new ArrayList<>();
                 private String stopReason;
+                private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+                private final AtomicBoolean turnHandled = new AtomicBoolean(false);
+
+                private void finishCurrentTurn() {
+                    if (!turnHandled.compareAndSet(false, true)) {
+                        return;
+                    }
+                    if (shouldContinueWithToolCalls(stopReason, toolCalls)) {
+                        handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                                contentBuffer.toString(), thinkBuffer.toString(),
+                                thinkSignatureBuffer.toString(), new ArrayList<>(toolCalls));
+                    } else {
+                        result.complete(contentBuffer.toString());
+                    }
+                }
 
                 @Override
                 public void onEvent(EventSource eventSource, String id, String type, String data) {
@@ -182,14 +197,9 @@ public class AnthropicModel implements LLMModel {
                                 }
                             }
                             case "message_stop" -> {
+                                cancelRequested.set(true);
                                 eventSource.cancel();
-                                if ("tool_use".equals(stopReason) && !toolCalls.isEmpty()) {
-                                    handleToolCallsAndContinue(result, messages, tools, toolExecutor,
-                                            contentBuffer.toString(), thinkBuffer.toString(),
-                                            thinkSignatureBuffer.toString(), toolCalls);
-                                } else {
-                                    result.complete(contentBuffer.toString());
-                                }
+                                finishCurrentTurn();
                             }
                             case "error" -> {
                                 String errorMsg = json.has("message") ? json.get("message").asText() : "Unknown error";
@@ -204,8 +214,10 @@ public class AnthropicModel implements LLMModel {
                 @Override
                 public void onFailure(EventSource eventSource, Throwable t, Response response) {
                     if (t instanceof StreamResetException) {
-                        // 连接被重置, 可能是模型主动关闭连接, 视为正常结束, 直接返回当前内容
-                        result.complete(contentBuffer.toString());
+                        if (isClientCancelledStream(t) && cancelRequested.get()) {
+                            return;
+                        }
+                        finishCurrentTurn();
                         return;
                     }
                     String errMsg = "SSE connection failed";
@@ -411,6 +423,15 @@ public class AnthropicModel implements LLMModel {
         if (errorHandler != null) {
             errorHandler.accept(t instanceof Exception ? (Exception) t : new RuntimeException(t));
         }
+    }
+
+    private static boolean shouldContinueWithToolCalls(String stopReason, List<ToolCallEntry> toolCalls) {
+        return "tool_use".equals(stopReason) && toolCalls != null && !toolCalls.isEmpty();
+    }
+
+    private static boolean isClientCancelledStream(Throwable t) {
+        return t instanceof StreamResetException
+                && ((StreamResetException) t).errorCode == ErrorCode.CANCEL;
     }
 
     private boolean isMiMoModel() {
