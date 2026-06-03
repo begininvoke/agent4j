@@ -1,5 +1,10 @@
 package ink.icoding.llm.agent;
 
+import ink.icoding.llm.core.model.TokenUsage;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -22,6 +27,7 @@ public class AgentSessionResult {
     private java.util.function.Consumer<Exception> errorHandler;
     private final java.util.function.Consumer<AgentSessionResult> executor;
     private final CompletableFuture<String> future = new CompletableFuture<>();
+    private final List<TokenUsage> usages = Collections.synchronizedList(new ArrayList<>());
 
     /**
      * 构造结果对象.
@@ -96,5 +102,38 @@ public class AgentSessionResult {
     /** 获取错误回调处理器 */
     public java.util.function.Consumer<Exception> getErrorHandler() {
         return errorHandler;
+    }
+
+    /**
+     * 记录Token用量.
+     *
+     * @param usage Token用量
+     */
+    public void addUsage(TokenUsage usage) {
+        if (usage != null) {
+            usages.add(usage);
+        }
+    }
+
+    /**
+     * 获取本次会话命令中的Token用量记录.
+     *
+     * @return Token用量副本
+     */
+    public List<TokenUsage> getUsages() {
+        synchronized (usages) {
+            return new ArrayList<>(usages);
+        }
+    }
+
+    /**
+     * 获取最近一次Token用量.
+     *
+     * @return 最近一次Token用量, 不存在时返回null
+     */
+    public TokenUsage getLastUsage() {
+        synchronized (usages) {
+            return usages.isEmpty() ? null : usages.get(usages.size() - 1);
+        }
     }
 }

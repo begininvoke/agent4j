@@ -1,5 +1,10 @@
 package ink.icoding.llm.core.model;
 
+import ink.icoding.llm.core.entity.Message;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -21,6 +26,8 @@ public class LLMResult {
     private java.util.function.Consumer<Exception> errorHandler;
     private final java.util.function.Consumer<LLMResult> executor;
     private final CompletableFuture<String> future = new CompletableFuture<>();
+    private final List<Message> appendedMessages = Collections.synchronizedList(new ArrayList<>());
+    private final List<TokenUsage> usages = Collections.synchronizedList(new ArrayList<>());
 
     /**
      * 构造结果对象.
@@ -104,5 +111,80 @@ public class LLMResult {
      */
     public java.util.function.Consumer<Exception> getErrorHandler() {
         return errorHandler;
+    }
+
+    /**
+     * 记录模型在Agent循环中追加到上下文的真实消息.
+     *
+     * @param message 追加消息
+     */
+    public void addAppendedMessage(Message message) {
+        if (message != null) {
+            appendedMessages.add(message);
+        }
+    }
+
+    /**
+     * 获取模型在本次调用中追加的真实消息.
+     *
+     * @return 追加消息副本
+     */
+    public List<Message> getAppendedMessages() {
+        synchronized (appendedMessages) {
+            return new ArrayList<>(appendedMessages);
+        }
+    }
+
+    /**
+     * 记录Token用量并触发回调.
+     *
+     * @param usage Token用量
+     */
+    public void addUsage(TokenUsage usage) {
+        if (usage == null) {
+            return;
+        }
+        usages.add(usage);
+        ResultHandler h = handler;
+        if (h != null) {
+            h.onUsage(usage);
+        }
+    }
+
+    /**
+     * 获取本次调用的所有Token用量记录.
+     *
+     * @return Token用量副本
+     */
+    public List<TokenUsage> getUsages() {
+        synchronized (usages) {
+            return new ArrayList<>(usages);
+        }
+    }
+
+    /**
+     * 获取最近一次Token用量.
+     *
+     * @return 最近一次Token用量, 不存在时返回null
+     */
+    public TokenUsage getLastUsage() {
+        synchronized (usages) {
+            return usages.isEmpty() ? null : usages.get(usages.size() - 1);
+        }
+    }
+
+    /**
+     * 获取本次调用中最大的输入上下文Token数.
+     *
+     * @return 最大输入Token数
+     */
+    public int getMaxInputTokens() {
+        synchronized (usages) {
+            int max = 0;
+            for (TokenUsage usage : usages) {
+                max = Math.max(max, usage.getInputTokens());
+            }
+            return max;
+        }
     }
 }

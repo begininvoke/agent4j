@@ -32,4 +32,20 @@ public interface ResultHandler {
      * @param status 工具调用状态
      */
     default void onTool(ToolDescriptor tool, ToolStatus status) {}
+
+    /**
+     * 当模型返回Token用量信息时回调.
+     *
+     * @param usage Token用量信息
+     */
+    default void onUsage(TokenUsage usage) {}
+
+    /**
+     * 当会话上下文压缩状态变化时回调.
+     *
+     * @param status       压缩状态
+     * @param beforeTokens 压缩前上下文Token数
+     * @param afterTokens  压缩后上下文Token数; 开始压缩时为0
+     */
+    default void onContextCompression(ContextCompressionStatus status, int beforeTokens, int afterTokens) {}
 }

@@ -9,6 +9,7 @@ import ink.icoding.llm.core.entity.MessageAttachment;
 import ink.icoding.llm.core.model.LLMModel;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
+import ink.icoding.llm.core.model.TokenUsage;
 import ink.icoding.llm.core.tool.Tool;
 import ink.icoding.llm.core.tool.ToolDescriptor;
 import ink.icoding.llm.core.tool.ToolExecutor;
@@ -122,6 +123,10 @@ public class OpenAIChatModel implements LLMModel {
                     if ("[DONE]".equals(data)) return;
                     try {
                         JsonNode json = MAPPER.readTree(data);
+                        TokenUsage usage = parseTokenUsage(json);
+                        if (usage != null) {
+                            result.addUsage(usage);
+                        }
                         JsonNode choices = json.get("choices");
                         if (choices == null || choices.isEmpty()) return;
 
@@ -184,7 +189,11 @@ public class OpenAIChatModel implements LLMModel {
                                     JsonNode function = toolCall.get("function");
                                     if (function != null) {
                                         JsonNode nameNode = function.get("name");
-                                        if (nameNode != null) entry.toolName = nameNode.asText();
+                                        if (nameNode != null) {
+                                            entry.nameBuffer.append(nameNode.asText());
+                                            entry.toolName = entry.nameBuffer.toString();
+                                            notifyToolPreparing(result, entry);
+                                        }
                                         JsonNode args = function.get("arguments");
                                         if (args != null) entry.argsBuffer.append(args.asText());
                                     }
@@ -202,6 +211,7 @@ public class OpenAIChatModel implements LLMModel {
                                         contentBuffer.toString(), thinkBuffer.toString(), toolCalls);
                             } else if ("stop".equals(reason)) {
                                 eventSource.cancel();
+                                addFinalAssistantMessage(result, contentBuffer.toString(), thinkBuffer.toString());
                                 result.complete(contentBuffer.toString());
                             }
                         }
@@ -276,7 +286,12 @@ public class OpenAIChatModel implements LLMModel {
                 toolCallsArray.add(tc);
             }
             assistantMsg.set("tool_calls", toolCallsArray);
-            messages.add(Message.fromAssistant(assistantMsg.toString()));
+            Message assistantMessage = Message.fromAssistant(assistantMsg.toString());
+            if (think != null && !think.isEmpty()) {
+                assistantMessage.appendThink(think);
+            }
+            messages.add(assistantMessage);
+            result.addAppendedMessage(assistantMessage);
 
             // 执行每个工具调用并添加结果
             for (ToolCallEntry entry : toolCalls) {
@@ -284,13 +299,16 @@ public class OpenAIChatModel implements LLMModel {
                 descriptor.setCallId(entry.callId);
                 descriptor.setInputParams(entry.argsBuffer.toString());
 
-                String toolResult = toolExecutor.execute(entry.toolName, entry.argsBuffer.toString(), descriptor, result.getHandler());
+                String toolResult = toolExecutor.execute(entry.toolName, entry.argsBuffer.toString(), descriptor,
+                        suppressPreparingIfAlreadyNotified(result.getHandler(), entry.preparingNotified));
 
                 ObjectNode toolMsg = MAPPER.createObjectNode();
                 toolMsg.put("role", "tool");
                 toolMsg.put("tool_call_id", entry.callId);
                 toolMsg.put("content", toolResult);
-                messages.add(Message.fromTool(toolMsg.toString()));
+                Message toolMessage = Message.fromTool(toolMsg.toString());
+                messages.add(toolMessage);
+                result.addAppendedMessage(toolMessage);
             }
 
             // 继续Agent循环
@@ -300,13 +318,75 @@ public class OpenAIChatModel implements LLMModel {
         }
     }
 
+    private void addFinalAssistantMessage(LLMResult result, String content, String think) {
+        if ((content == null || content.isEmpty()) && (think == null || think.isEmpty())) {
+            return;
+        }
+        Message assistantMessage = Message.fromAssistant();
+        if (content != null && !content.isEmpty()) {
+            assistantMessage.appendContent(content);
+        }
+        if (think != null && !think.isEmpty()) {
+            assistantMessage.appendThink(think);
+        }
+        result.addAppendedMessage(assistantMessage);
+    }
+
     /**
      * 工具调用条目.
      */
     private static class ToolCallEntry {
         String callId;
         String toolName;
+        boolean preparingNotified;
+        final StringBuilder nameBuffer = new StringBuilder();
         final StringBuilder argsBuffer = new StringBuilder();
+    }
+
+    private void notifyToolPreparing(LLMResult result, ToolCallEntry entry) {
+        if (entry.preparingNotified || entry.toolName == null || entry.toolName.isEmpty()) {
+            return;
+        }
+        Tool tool = toolMap.get(entry.toolName);
+        if (tool == null) {
+            return;
+        }
+        ToolDescriptor descriptor = ToolDescriptor.fromTool(tool);
+        descriptor.setCallId(entry.callId);
+        ResultHandler handler = result.getHandler();
+        if (handler != null) {
+            handler.onTool(descriptor, ToolStatus.PREPARING);
+        }
+        entry.preparingNotified = true;
+    }
+
+    private ResultHandler suppressPreparingIfAlreadyNotified(ResultHandler handler, boolean suppressPreparing) {
+        if (!suppressPreparing || handler == null) {
+            return handler;
+        }
+        return new ResultHandler() {
+            @Override
+            public void onMessage(String message) {
+                handler.onMessage(message);
+            }
+
+            @Override
+            public void onThink(String think) {
+                handler.onThink(think);
+            }
+
+            @Override
+            public void onTool(ToolDescriptor tool, ToolStatus status) {
+                if (status != ToolStatus.PREPARING) {
+                    handler.onTool(tool, status);
+                }
+            }
+
+            @Override
+            public void onUsage(TokenUsage usage) {
+                handler.onUsage(usage);
+            }
+        };
     }
 
     /**
@@ -320,6 +400,9 @@ public class OpenAIChatModel implements LLMModel {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", modelName);
         body.put("stream", true);
+        ObjectNode streamOptions = MAPPER.createObjectNode();
+        streamOptions.put("include_usage", true);
+        body.set("stream_options", streamOptions);
 
         ArrayNode messagesArray = MAPPER.createArrayNode();
         for (Message msg : messages) {
@@ -374,6 +457,44 @@ public class OpenAIChatModel implements LLMModel {
         }
 
         return body;
+    }
+
+    private TokenUsage parseTokenUsage(JsonNode json) {
+        JsonNode usage = json.get("usage");
+        if (usage == null || usage.isNull()) {
+            usage = json.get("used");
+        }
+        if (usage == null || usage.isNull()) {
+            return null;
+        }
+        if (usage.isNumber()) {
+            return new TokenUsage(usage.asInt(), 0, usage.asInt());
+        }
+        int input = firstInt(usage, "prompt_tokens", "input_tokens");
+        int output = firstInt(usage, "completion_tokens", "output_tokens");
+        int total = firstInt(usage, "total_tokens", "used");
+        int cached = firstInt(usage, "cached_tokens", "prompt_cache_hit_tokens", "cache_hit_tokens");
+        cached = Math.max(cached, nestedFirstInt(usage, "prompt_tokens_details", "cached_tokens"));
+        cached = Math.max(cached, nestedFirstInt(usage, "input_tokens_details", "cached_tokens"));
+        if (input <= 0 && output <= 0 && total <= 0 && cached <= 0) {
+            return null;
+        }
+        return new TokenUsage(input, output, total, cached);
+    }
+
+    private int firstInt(JsonNode node, String... names) {
+        for (String name : names) {
+            JsonNode value = node.get(name);
+            if (value != null && value.isNumber()) {
+                return value.asInt();
+            }
+        }
+        return 0;
+    }
+
+    private int nestedFirstInt(JsonNode node, String objectName, String... names) {
+        JsonNode child = node.get(objectName);
+        return child == null || child.isNull() ? 0 : firstInt(child, names);
     }
 
     /**

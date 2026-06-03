@@ -9,6 +9,7 @@ import ink.icoding.llm.core.entity.MessageAttachment;
 import ink.icoding.llm.core.model.LLMModel;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
+import ink.icoding.llm.core.model.TokenUsage;
 import ink.icoding.llm.core.tool.Tool;
 import ink.icoding.llm.core.tool.ToolDescriptor;
 import ink.icoding.llm.core.tool.ToolExecutor;
@@ -126,6 +127,7 @@ public class OpenAIResponseModel implements LLMModel {
                         handleToolCallsAndContinue(result, messages, tools, toolExecutor,
                                 contentBuffer.toString(), thinkBuffer.toString(), new ArrayList<>(toolCalls));
                     } else {
+                        addFinalAssistantMessage(result, contentBuffer.toString(), thinkBuffer.toString());
                         result.complete(contentBuffer.toString());
                     }
                 }
@@ -134,6 +136,10 @@ public class OpenAIResponseModel implements LLMModel {
                 public void onEvent(EventSource eventSource, String id, String type, String data) {
                     try {
                         JsonNode json = MAPPER.readTree(data);
+                        TokenUsage usage = parseTokenUsage(json);
+                        if (usage != null) {
+                            result.addUsage(usage);
+                        }
                         String eventType = json.has("type") ? json.get("type").asText() : "";
 
                         switch (eventType) {
@@ -153,6 +159,7 @@ public class OpenAIResponseModel implements LLMModel {
                                 currentCallId = json.get("call_id").asText();
                                 currentToolName = json.get("name").asText();
                                 toolArgsBuffer.setLength(0);
+                                notifyToolPreparing(result, currentToolName, currentCallId);
                             }
                             case "response.function_call_arguments.delta" -> {
                                 toolArgsBuffer.append(json.get("delta").asText());
@@ -225,6 +232,18 @@ public class OpenAIResponseModel implements LLMModel {
                     assistantMessage.appendThink(think);
                 }
                 messages.add(assistantMessage);
+                result.addAppendedMessage(assistantMessage);
+            }
+
+            for (ToolCallEntry entry : toolCalls) {
+                ObjectNode callItem = MAPPER.createObjectNode();
+                callItem.put("type", "function_call");
+                callItem.put("call_id", entry.callId);
+                callItem.put("name", entry.toolName);
+                callItem.put("arguments", entry.argsJson);
+                Message callMessage = Message.fromAssistant(callItem.toString());
+                messages.add(callMessage);
+                result.addAppendedMessage(callMessage);
             }
 
             // 执行每个工具调用并添加function_call_output
@@ -233,14 +252,17 @@ public class OpenAIResponseModel implements LLMModel {
                 descriptor.setCallId(entry.callId);
                 descriptor.setInputParams(entry.argsJson);
 
-                String toolResult = toolExecutor.execute(entry.toolName, entry.argsJson, descriptor, result.getHandler());
+                String toolResult = toolExecutor.execute(entry.toolName, entry.argsJson, descriptor,
+                        suppressPreparing(result.getHandler()));
 
                 // Responses API使用function_call_output格式
                 ObjectNode outputItem = MAPPER.createObjectNode();
                 outputItem.put("type", "function_call_output");
                 outputItem.put("call_id", entry.callId);
                 outputItem.put("output", toolResult);
-                messages.add(Message.fromTool(outputItem.toString()));
+                Message toolMessage = Message.fromTool(outputItem.toString());
+                messages.add(toolMessage);
+                result.addAppendedMessage(toolMessage);
             }
 
             // 继续Agent循环
@@ -257,6 +279,65 @@ public class OpenAIResponseModel implements LLMModel {
         String callId;
         String toolName;
         String argsJson;
+    }
+
+    private void notifyToolPreparing(LLMResult result, String toolName, String callId) {
+        if (toolName == null || toolName.isEmpty()) {
+            return;
+        }
+        Tool tool = toolMap.get(toolName);
+        if (tool == null) {
+            return;
+        }
+        ToolDescriptor descriptor = ToolDescriptor.fromTool(tool);
+        descriptor.setCallId(callId);
+        ResultHandler handler = result.getHandler();
+        if (handler != null) {
+            handler.onTool(descriptor, ToolStatus.PREPARING);
+        }
+    }
+
+    private ResultHandler suppressPreparing(ResultHandler handler) {
+        if (handler == null) {
+            return null;
+        }
+        return new ResultHandler() {
+            @Override
+            public void onMessage(String message) {
+                handler.onMessage(message);
+            }
+
+            @Override
+            public void onThink(String think) {
+                handler.onThink(think);
+            }
+
+            @Override
+            public void onTool(ToolDescriptor tool, ToolStatus status) {
+                if (status != ToolStatus.PREPARING) {
+                    handler.onTool(tool, status);
+                }
+            }
+
+            @Override
+            public void onUsage(TokenUsage usage) {
+                handler.onUsage(usage);
+            }
+        };
+    }
+
+    private void addFinalAssistantMessage(LLMResult result, String content, String think) {
+        if ((content == null || content.isEmpty()) && (think == null || think.isEmpty())) {
+            return;
+        }
+        Message assistantMessage = Message.fromAssistant();
+        if (content != null && !content.isEmpty()) {
+            assistantMessage.appendContent(content);
+        }
+        if (think != null && !think.isEmpty()) {
+            assistantMessage.appendThink(think);
+        }
+        result.addAppendedMessage(assistantMessage);
     }
 
     /**
@@ -338,6 +419,50 @@ public class OpenAIResponseModel implements LLMModel {
             item.set("content", contentArray);
         }
         return item;
+    }
+
+    private TokenUsage parseTokenUsage(JsonNode json) {
+        JsonNode usage = json.get("usage");
+        if (usage == null || usage.isNull()) {
+            JsonNode response = json.get("response");
+            if (response != null && !response.isNull()) {
+                usage = response.get("usage");
+            }
+        }
+        if (usage == null || usage.isNull()) {
+            usage = json.get("used");
+        }
+        if (usage == null || usage.isNull()) {
+            return null;
+        }
+        if (usage.isNumber()) {
+            return new TokenUsage(usage.asInt(), 0, usage.asInt());
+        }
+        int input = firstInt(usage, "input_tokens", "prompt_tokens");
+        int output = firstInt(usage, "output_tokens", "completion_tokens");
+        int total = firstInt(usage, "total_tokens", "used");
+        int cached = firstInt(usage, "cached_tokens", "prompt_cache_hit_tokens", "cache_hit_tokens");
+        cached = Math.max(cached, nestedFirstInt(usage, "input_tokens_details", "cached_tokens"));
+        cached = Math.max(cached, nestedFirstInt(usage, "prompt_tokens_details", "cached_tokens"));
+        if (input <= 0 && output <= 0 && total <= 0 && cached <= 0) {
+            return null;
+        }
+        return new TokenUsage(input, output, total, cached);
+    }
+
+    private int firstInt(JsonNode node, String... names) {
+        for (String name : names) {
+            JsonNode value = node.get(name);
+            if (value != null && value.isNumber()) {
+                return value.asInt();
+            }
+        }
+        return 0;
+    }
+
+    private int nestedFirstInt(JsonNode node, String objectName, String... names) {
+        JsonNode child = node.get(objectName);
+        return child == null || child.isNull() ? 0 : firstInt(child, names);
     }
 
     /**

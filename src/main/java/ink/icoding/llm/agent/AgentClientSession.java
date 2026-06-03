@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ink.icoding.llm.core.entity.MemoryMultipartFile;
 import ink.icoding.llm.core.entity.Message;
+import ink.icoding.llm.core.model.ContextCompressionStatus;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
+import ink.icoding.llm.core.model.TokenUsage;
 import ink.icoding.llm.core.tool.Tool;
 import ink.icoding.llm.core.tool.ToolDescriptor;
 import ink.icoding.llm.core.tool.ToolExecutor;
@@ -41,8 +43,8 @@ import java.util.stream.Collectors;
 public class AgentClientSession {
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-    private static final int MAX_HISTORY_ROUNDS = 100;
-    private static final int CONTEXT_ROUNDS = 10;
+    private static final int CONTEXT_SUMMARY_TRIGGER_TOKENS = 100_000;
+    private static final int MEMORY_SUMMARY_MAX_TOKENS = 5_000;
 
     private final AgentClient agent;
     private final List<Message> history = new ArrayList<>();
@@ -50,6 +52,8 @@ public class AgentClientSession {
     private final List<Plan> plans = new ArrayList<>();
     private final CreatePlanTool createPlanTool = new CreatePlanTool();
     private final CreateSubAgentTool createSubAgentTool = new CreateSubAgentTool();
+    private String memorySummary;
+    private int lastContextTokens;
 
     /**
      * 构造会话实例.
@@ -89,12 +93,12 @@ public class AgentClientSession {
 
     /**
      * 执行指令, 调用底层LLM并处理响应.
-     * 自动压缩历史: 只发送最近{@value #CONTEXT_ROUNDS}轮用户可见对话给LLM.
+     * 保持完整历史, 只在上下文达到阈值后做一次性记忆总结.
      *
      * @param result 会话结果对象
      */
     private void executeCommand(AgentSessionResult result) {
-        List<Message> messages = buildMessages(compressHistory(history, CONTEXT_ROUNDS));
+        List<Message> messages = buildMessages(history);
         List<Tool> allTools = getAllTools();
 
         ToolExecutor toolExecutor = createToolExecutor(result);
@@ -127,6 +131,15 @@ public class AgentClientSession {
                         result.getHandler().onTool(tool, status);
                     }
                 }
+
+                @Override
+                public void onUsage(TokenUsage usage) {
+                    result.addUsage(usage);
+                    lastContextTokens = Math.max(lastContextTokens, usage.getInputTokens());
+                    if (result.getHandler() != null) {
+                        result.getHandler().onUsage(usage);
+                    }
+                }
             }).error(e -> {
                 result.completeExceptionally(e);
                 if (result.getErrorHandler() != null) {
@@ -139,15 +152,21 @@ public class AgentClientSession {
 
             // 阻塞等待LLM完成(包含Agent循环)
             String response = llmResult.get();
-            if ((assistantMessage.getContent() == null || assistantMessage.getContent().isEmpty())
-                    && response != null && !response.isEmpty()) {
-                assistantMessage.appendContent(response);
+            List<Message> appendedMessages = llmResult.getAppendedMessages();
+            if (!appendedMessages.isEmpty()) {
+                history.addAll(appendedMessages);
+            } else {
+                if ((assistantMessage.getContent() == null || assistantMessage.getContent().isEmpty())
+                        && response != null && !response.isEmpty()) {
+                    assistantMessage.appendContent(response);
+                }
+                if ((assistantMessage.getContent() != null && !assistantMessage.getContent().isEmpty())
+                        || (assistantMessage.getThink() != null && !assistantMessage.getThink().isEmpty())) {
+                    history.add(assistantMessage);
+                }
             }
-            if ((assistantMessage.getContent() != null && !assistantMessage.getContent().isEmpty())
-                    || (assistantMessage.getThink() != null && !assistantMessage.getThink().isEmpty())) {
-                history.add(assistantMessage);
-            }
-            trimHistory();
+            lastContextTokens = Math.max(lastContextTokens, llmResult.getMaxInputTokens());
+            summarizeHistoryIfNeeded(result);
             result.complete(response);
         } catch (Exception e) {
             result.completeExceptionally(e);
@@ -239,6 +258,11 @@ public class AgentClientSession {
                     public void onTool(ToolDescriptor tool, ToolStatus status) {
                         if (agentHandler != null) agentHandler.onPlanStepTool(plan, tool, status);
                     }
+
+                    @Override
+                    public void onUsage(TokenUsage usage) {
+                        if (agentHandler != null) agentHandler.onUsage(usage);
+                    }
                 }).error(e -> {
                     if (agentHandler != null) agentHandler.onPlanStepError(plan, current, total, step, e);
                 });
@@ -329,6 +353,11 @@ public class AgentClientSession {
                 public void onTool(ToolDescriptor tool, ToolStatus status) {
                     if (agentHandler != null) agentHandler.onTool(tool, status);
                 }
+
+                @Override
+                public void onUsage(TokenUsage usage) {
+                    if (agentHandler != null) agentHandler.onUsage(usage);
+                }
             }).error(e -> {
                 if (agentHandler != null) agentHandler.onSubAgentResult(subAgent, "Error: " + e.getMessage());
             }).execute();
@@ -372,11 +401,6 @@ public class AgentClientSession {
         }
         systemPrompt.append(".\n\n");
 
-        // 注入系统环境信息
-        systemPrompt.append("## System Environment\n");
-        systemPrompt.append(buildSystemContext());
-        systemPrompt.append("\n");
-
         if (!agent.getSkills().isEmpty()) {
             systemPrompt.append("## Available Skills\n");
             for (Skill skill : agent.getSkills()) {
@@ -393,6 +417,19 @@ public class AgentClientSession {
             systemPrompt.append("You have access to the following tools. Use them when appropriate.\n\n");
         }
 
+        // 注入系统环境信息. 放在更稳定的身份、技能和工具说明之后, 有利于前缀缓存命中.
+        systemPrompt.append("## System Environment\n");
+        systemPrompt.append(buildSystemContext());
+        systemPrompt.append("\n");
+
+        if (memorySummary != null && !memorySummary.isBlank()) {
+            systemPrompt.append("## Session Memory (Compressed, Not Verbatim Dialogue)\n");
+            systemPrompt.append("The following is a distilled memory of earlier conversation in this session. ");
+            systemPrompt.append("It is not the original dialogue transcript. Treat it as background notes, ");
+            systemPrompt.append("do not invent missing tool calls or exact wording from it, and use tools again when fresh verification is needed.\n");
+            systemPrompt.append(memorySummary).append("\n\n");
+        }
+
         Message systemMsg = Message.fromUser(systemPrompt.toString());
         messages.add(systemMsg);
         messages.addAll(contextMessages);
@@ -400,86 +437,84 @@ public class AgentClientSession {
         return messages;
     }
 
-    /**
-     * 压缩对话历史为用户可见的轮次.
-     * <p>每一轮 = 一条用户消息 + 该轮AI最终输出文本.
-     * 工具调用链(无论多少次)整体算作一轮的中间过程, 不保留.</p>
-     *
-     * @param src   原始历史
-     * @param limit 最多保留的轮数
-     * @return 压缩后的消息列表
-     */
-    private List<Message> compressHistory(List<Message> src, int limit) {
-        List<List<Message>> rounds = new ArrayList<>();
-        List<Message> currentRound = new ArrayList<>();
-        List<Message> assistantBuffer = new ArrayList<>();
+    private void summarizeHistoryIfNeeded(AgentSessionResult result) {
+        if (lastContextTokens < CONTEXT_SUMMARY_TRIGGER_TOKENS || history.isEmpty()) {
+            return;
+        }
+        int beforeTokens = lastContextTokens;
+        AgentResultHandler handler = result.getHandler();
+        if (handler != null) {
+            handler.onContextCompression(ContextCompressionStatus.STARTED, beforeTokens, 0);
+        }
 
-        for (Message msg : src) {
-            if (msg.getRole() == Message.Role.tool) {
-                continue;
+        SummaryResult summaryResult = summarizeHistory();
+        int afterTokens = summaryResult == null ? 0 : summaryResult.afterTokens();
+        if (summaryResult == null || summaryResult.summary() == null || summaryResult.summary().isBlank()) {
+            if (handler != null) {
+                handler.onContextCompression(ContextCompressionStatus.COMPLETED, beforeTokens, afterTokens);
             }
-            if (msg.getRole() == Message.Role.user) {
-                if (!assistantBuffer.isEmpty()) {
-                    currentRound.add(assistantBuffer.get(assistantBuffer.size() - 1));
-                    assistantBuffer.clear();
-                }
-                if (!currentRound.isEmpty()) {
-                    rounds.add(currentRound);
-                    currentRound = new ArrayList<>();
-                }
-                currentRound.add(msg);
-            } else if (msg.getRole() == Message.Role.assistant) {
-                assistantBuffer.add(msg);
-            }
+            return;
         }
-
-        if (!assistantBuffer.isEmpty()) {
-            currentRound.add(assistantBuffer.get(assistantBuffer.size() - 1));
+        memorySummary = summaryResult.summary().trim();
+        history.clear();
+        lastContextTokens = 0;
+        if (handler != null) {
+            handler.onContextCompression(ContextCompressionStatus.COMPLETED, beforeTokens, afterTokens);
         }
-        if (!currentRound.isEmpty()) {
-            rounds.add(currentRound);
-        }
-
-        List<List<Message>> kept = rounds.size() <= limit
-                ? rounds
-                : rounds.subList(rounds.size() - limit, rounds.size());
-
-        List<Message> result = new ArrayList<>();
-        for (List<Message> round : kept) {
-            for (Message msg : round) {
-                Message copy = new Message();
-                copy.setRole(msg.getRole());
-                copy.setContent(msg.getContent());
-                copy.setThink(msg.getThink());
-                if (msg.getAttachments() != null && !msg.getAttachments().isEmpty()) {
-                    copy.setAttachments(new ArrayList<>(msg.getAttachments()));
-                }
-                result.add(copy);
-            }
-        }
-        return result;
     }
 
-    /**
-     * 裁剪历史, 保留最近{@value #MAX_HISTORY_ROUNDS}轮用户可见对话.
-     * <p>超出轮数的早期消息将被移除, 释放内存.</p>
-     */
-    private void trimHistory() {
-        int roundCount = 0;
-        int cutIndex = -1;
-        for (int i = history.size() - 1; i >= 0; i--) {
-            Message msg = history.get(i);
-            if (msg.getRole() == Message.Role.user) {
-                roundCount++;
-                if (roundCount > MAX_HISTORY_ROUNDS) {
-                    cutIndex = i;
-                    break;
-                }
+    private SummaryResult summarizeHistory() {
+        List<Message> summaryMessages = new ArrayList<>();
+        summaryMessages.add(Message.fromUser(buildSummarySystemPrompt()));
+        if (memorySummary != null && !memorySummary.isBlank()) {
+            summaryMessages.add(Message.fromUser("Previous compressed session memory:\n" + memorySummary));
+        }
+        summaryMessages.add(Message.fromUser("Full recent session transcript to distill follows. Preserve important facts, decisions, user preferences, unresolved tasks, and important tool findings. This transcript may include structured tool-call JSON; summarize the meaning, not the JSON syntax."));
+        summaryMessages.addAll(history);
+        summaryMessages.add(Message.fromUser("Create the new compressed session memory now. Keep it under about "
+                + MEMORY_SUMMARY_MAX_TOKENS + " tokens."));
+
+        try {
+            LLMResult summaryResult = agent.getModel().ask(summaryMessages, List.of());
+            summaryResult.execute();
+            String summary = summaryResult.get();
+            if ((summary == null || summary.isBlank()) && !summaryResult.getAppendedMessages().isEmpty()) {
+                Message last = summaryResult.getAppendedMessages().get(summaryResult.getAppendedMessages().size() - 1);
+                summary = last.getContent();
             }
+            return new SummaryResult(summary, compressedTokens(summaryResult));
+        } catch (Exception e) {
+            return null;
         }
-        if (cutIndex > 0) {
-            history.subList(0, cutIndex).clear();
+    }
+
+    private int compressedTokens(LLMResult summaryResult) {
+        TokenUsage usage = summaryResult.getLastUsage();
+        if (usage == null) {
+            return 0;
         }
+        if (usage.getOutputTokens() > 0) {
+            return usage.getOutputTokens();
+        }
+        return usage.getTotalTokens();
+    }
+
+    private record SummaryResult(String summary, int afterTokens) {}
+
+    private String buildSummarySystemPrompt() {
+        return """
+                You are compressing an agent session into durable memory.
+
+                Rules:
+                - Output only the compressed memory, not analysis or commentary.
+                - The memory must stay under about 5000 tokens.
+                - Combine any previous memory with the current transcript into one updated memory.
+                - Preserve durable user preferences, explicit requirements, project facts, decisions made, unresolved tasks, and important tool results.
+                - Forget routine tool logs, repeated content, obsolete intermediate attempts, small talk, and details that are unlikely to matter later.
+                - Mark uncertainty explicitly when a fact was inferred or only partially verified.
+                - Do not claim this memory is an exact transcript.
+                - Do not invent tool calls, file contents, command results, or user instructions that are not supported by the transcript.
+                """;
     }
 
     /**
@@ -589,6 +624,8 @@ public class AgentClientSession {
         try {
             SerializationData data = new SerializationData();
             data.setHistory(new ArrayList<>(history));
+            data.setMemorySummary(memorySummary);
+            data.setLastContextTokens(lastContextTokens);
             data.setSubAgents(subAgents.stream()
                     .map(AgentClient::getName)
                     .collect(Collectors.toList()));
@@ -613,6 +650,8 @@ public class AgentClientSession {
             AgentClientSession session = new AgentClientSession(agent);
             session.getHistory().addAll(data.getHistory());
             session.getPlans().addAll(data.getPlans());
+            session.memorySummary = data.getMemorySummary();
+            session.lastContextTokens = data.getLastContextTokens();
             return session;
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to deserialize session", e);
@@ -628,6 +667,12 @@ public class AgentClientSession {
     /** 获取计划列表 */
     public List<Plan> getPlans() { return plans; }
 
+    /** 获取压缩后的会话记忆 */
+    public String getMemorySummary() { return memorySummary; }
+
+    /** 获取最近记录到的上下文Token量 */
+    public int getLastContextTokens() { return lastContextTokens; }
+
     /**
      * 序列化数据内部类.
      */
@@ -635,6 +680,8 @@ public class AgentClientSession {
         private List<Message> history = new ArrayList<>();
         private List<String> subAgents = new ArrayList<>();
         private List<Plan> plans = new ArrayList<>();
+        private String memorySummary;
+        private int lastContextTokens;
 
         public List<Message> getHistory() { return history; }
         public void setHistory(List<Message> history) { this.history = history; }
@@ -642,5 +689,9 @@ public class AgentClientSession {
         public void setSubAgents(List<String> subAgents) { this.subAgents = subAgents; }
         public List<Plan> getPlans() { return plans; }
         public void setPlans(List<Plan> plans) { this.plans = plans; }
+        public String getMemorySummary() { return memorySummary; }
+        public void setMemorySummary(String memorySummary) { this.memorySummary = memorySummary; }
+        public int getLastContextTokens() { return lastContextTokens; }
+        public void setLastContextTokens(int lastContextTokens) { this.lastContextTokens = lastContextTokens; }
     }
 }

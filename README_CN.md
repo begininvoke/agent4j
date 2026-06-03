@@ -69,7 +69,7 @@ Agent4j 是一个轻量级 Java 框架，让你只需几行代码就能构建**�
 <dependency>
     <groupId>ink.icoding.llm</groupId>
     <artifactId>agent4j</artifactId>
-    <version>1.3</version>
+    <version>2.1</version>
 </dependency>
 ```
 

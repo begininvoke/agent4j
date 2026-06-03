@@ -9,9 +9,11 @@ import ink.icoding.llm.core.entity.MessageAttachment;
 import ink.icoding.llm.core.model.LLMModel;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
+import ink.icoding.llm.core.model.TokenUsage;
 import ink.icoding.llm.core.tool.Tool;
 import ink.icoding.llm.core.tool.ToolDescriptor;
 import ink.icoding.llm.core.tool.ToolExecutor;
+import ink.icoding.llm.core.tool.ToolStatus;
 import okhttp3.*;
 import okhttp3.internal.http2.ErrorCode;
 import okhttp3.internal.http2.StreamResetException;
@@ -129,6 +131,7 @@ public class AnthropicModel implements LLMModel {
                                 contentBuffer.toString(), thinkBuffer.toString(),
                                 thinkSignatureBuffer.toString(), new ArrayList<>(toolCalls));
                     } else {
+                        addFinalAssistantMessage(result, contentBuffer.toString(), thinkBuffer.toString());
                         result.complete(contentBuffer.toString());
                     }
                 }
@@ -137,6 +140,10 @@ public class AnthropicModel implements LLMModel {
                 public void onEvent(EventSource eventSource, String id, String type, String data) {
                     try {
                         JsonNode json = MAPPER.readTree(data);
+                        TokenUsage usage = parseTokenUsage(json);
+                        if (usage != null) {
+                            result.addUsage(usage);
+                        }
                         String eventType = json.has("type") ? json.get("type").asText() : type;
 
                         switch (eventType) {
@@ -148,6 +155,7 @@ public class AnthropicModel implements LLMModel {
                                         currentToolId = contentBlock.get("id").asText();
                                         currentToolName = contentBlock.get("name").asText();
                                         toolInputBuffer.setLength(0);
+                                        notifyToolPreparing(result, currentToolName, currentToolId);
                                     } else if ("thinking".equals(currentBlockType) && contentBlock.has("signature")) {
                                         thinkSignatureBuffer.append(contentBlock.get("signature").asText());
                                     }
@@ -250,7 +258,12 @@ public class AnthropicModel implements LLMModel {
                                              List<ToolCallEntry> toolCalls) {
         try {
             // 添加assistant消息
-            messages.add(Message.fromAssistant(buildAssistantMessage(content, think, thinkSignature, toolCalls)));
+            Message assistantMessage = Message.fromAssistant(buildAssistantMessage(content, think, thinkSignature, toolCalls));
+            if (think != null && !think.isEmpty()) {
+                assistantMessage.appendThink(think);
+            }
+            messages.add(assistantMessage);
+            result.addAppendedMessage(assistantMessage);
 
             // 执行每个工具调用
             List<String> toolResults = new ArrayList<>();
@@ -259,12 +272,15 @@ public class AnthropicModel implements LLMModel {
                 descriptor.setCallId(entry.callId);
                 descriptor.setInputParams(entry.argsJson);
 
-                String toolResult = toolExecutor.execute(entry.toolName, entry.argsJson, descriptor, result.getHandler());
+                String toolResult = toolExecutor.execute(entry.toolName, entry.argsJson, descriptor,
+                        suppressPreparing(result.getHandler()));
                 toolResults.add(toolResult);
             }
 
             // Anthropic: 工具结果作为user消息中的tool_result内容块
-            messages.add(Message.fromTool(buildToolResultMessage(toolCalls, toolResults)));
+            Message toolMessage = Message.fromTool(buildToolResultMessage(toolCalls, toolResults));
+            messages.add(toolMessage);
+            result.addAppendedMessage(toolMessage);
 
             // 继续Agent循环
             executeAgentLoop(result, messages, tools, toolExecutor);
@@ -344,6 +360,65 @@ public class AnthropicModel implements LLMModel {
         String argsJson;
     }
 
+    private void notifyToolPreparing(LLMResult result, String toolName, String callId) {
+        if (toolName == null || toolName.isEmpty()) {
+            return;
+        }
+        Tool tool = toolMap.get(toolName);
+        if (tool == null) {
+            return;
+        }
+        ToolDescriptor descriptor = ToolDescriptor.fromTool(tool);
+        descriptor.setCallId(callId);
+        ResultHandler handler = result.getHandler();
+        if (handler != null) {
+            handler.onTool(descriptor, ToolStatus.PREPARING);
+        }
+    }
+
+    private ResultHandler suppressPreparing(ResultHandler handler) {
+        if (handler == null) {
+            return null;
+        }
+        return new ResultHandler() {
+            @Override
+            public void onMessage(String message) {
+                handler.onMessage(message);
+            }
+
+            @Override
+            public void onThink(String think) {
+                handler.onThink(think);
+            }
+
+            @Override
+            public void onTool(ToolDescriptor tool, ToolStatus status) {
+                if (status != ToolStatus.PREPARING) {
+                    handler.onTool(tool, status);
+                }
+            }
+
+            @Override
+            public void onUsage(TokenUsage usage) {
+                handler.onUsage(usage);
+            }
+        };
+    }
+
+    private void addFinalAssistantMessage(LLMResult result, String content, String think) {
+        if ((content == null || content.isEmpty()) && (think == null || think.isEmpty())) {
+            return;
+        }
+        Message assistantMessage = Message.fromAssistant();
+        if (content != null && !content.isEmpty()) {
+            assistantMessage.appendContent(content);
+        }
+        if (think != null && !think.isEmpty()) {
+            assistantMessage.appendThink(think);
+        }
+        result.addAppendedMessage(assistantMessage);
+    }
+
     /**
      * 构建Anthropic Messages请求体.
      */
@@ -412,6 +487,50 @@ public class AnthropicModel implements LLMModel {
         }
 
         return body;
+    }
+
+    private TokenUsage parseTokenUsage(JsonNode json) {
+        JsonNode usage = json.get("usage");
+        if (usage == null || usage.isNull()) {
+            JsonNode message = json.get("message");
+            if (message != null && !message.isNull()) {
+                usage = message.get("usage");
+            }
+        }
+        if (usage == null || usage.isNull()) {
+            JsonNode delta = json.get("delta");
+            if (delta != null && !delta.isNull()) {
+                usage = delta.get("usage");
+            }
+        }
+        if (usage == null || usage.isNull()) {
+            usage = json.get("used");
+        }
+        if (usage == null || usage.isNull()) {
+            return null;
+        }
+        if (usage.isNumber()) {
+            return new TokenUsage(usage.asInt(), 0, usage.asInt());
+        }
+        int input = firstInt(usage, "input_tokens", "prompt_tokens");
+        int output = firstInt(usage, "output_tokens", "completion_tokens");
+        int total = firstInt(usage, "total_tokens", "used");
+        int cached = firstInt(usage, "cache_read_input_tokens", "cached_tokens",
+                "prompt_cache_hit_tokens", "cache_hit_tokens");
+        if (input <= 0 && output <= 0 && total <= 0 && cached <= 0) {
+            return null;
+        }
+        return new TokenUsage(input, output, total, cached);
+    }
+
+    private int firstInt(JsonNode node, String... names) {
+        for (String name : names) {
+            JsonNode value = node.get(name);
+            if (value != null && value.isNumber()) {
+                return value.asInt();
+            }
+        }
+        return 0;
     }
 
     /**
