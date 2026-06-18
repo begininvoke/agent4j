@@ -16,7 +16,7 @@ public class MainTest {
         String apiKey = System.getenv("API_KEY");
         String model = System.getenv("MODEL");
 
-        LLMModel llm = LLMModel.create(ModelType.Anthropic, baseURL + "/anthropic", model, apiKey);
+        LLMModel llm = LLMModel.create(ModelType.OpenAI, baseURL, model, apiKey);
 
         AgentClient agent = new AgentClient();
         agent.setName("CodeAgent");
@@ -27,36 +27,7 @@ public class MainTest {
         AgentClientSession session = agent.createSession();
 
         String task = """
-                请在 /Users/xiatian/Desktop/plugin 目录下创建一个完整的Chrome插件项目和配套的Java Spring Boot后端.
-
-                ## Chrome插件需求
-                1. 在网页最前方右上角悬浮显示一个半透明浮层
-                2. 鼠标选中网页中的任意文本时, 弹出一个悬浮按钮(标注为"回答")
-                3. 点击"回答"按钮后, 将选中的文本内容通过POST请求发送到后端接口 http://localhost:8080/answer
-                4. 请求体为JSON格式: {"text": "选中的文本内容"}
-                5. 后端返回的答案文本显示在右上角的浮层中
-
-                ## 后端需求
-                1. Java Spring Boot应用, 监听 /answer 接口
-                2. 接收POST请求, 请求体包含 text 字段
-                3. 读取项目目录下 da.md 文件的内容作为参考资料
-                4. 将参考资料和选中文本一起发送给LLM, 生成答案
-                5. 将LLM返回的答案文本作为响应返回给前端
-
-                ## 项目结构
-                /Users/xiatian/Desktop/plugin/
-                ├── chrome-extension/          # Chrome插件
-                │   ├── manifest.json
-                │   ├── content.js
-                │   ├── content.css
-                │   └── popup.html (如需要)
-                ├── backend/                   # Spring Boot后端
-                │   ├── pom.xml
-                │   ├── src/main/java/...
-                │   └── src/main/resources/
-                └── da.md                      # 参考资料文件(我已经准备好了放在了/Users/xiatian/Desktop/plugin目录下, 你直接拿去用就行)
-
-                请逐步创建所有文件, 确保代码完整可运行.
+                创建一个子任务，子任务输出“你好”
                 """;
 
         session.command(task).then(new AgentResultHandler() {

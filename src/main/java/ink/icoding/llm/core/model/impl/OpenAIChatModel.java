@@ -185,17 +185,17 @@ public class OpenAIChatModel implements LLMModel {
                                     currentToolCallIndex = idx;
                                     ToolCallEntry entry = toolCalls.get(idx);
                                     JsonNode idNode = toolCall.get("id");
-                                    if (idNode != null) entry.callId = idNode.asText();
+                                    if (hasTextValue(idNode)) entry.callId = idNode.asText();
                                     JsonNode function = toolCall.get("function");
                                     if (function != null) {
                                         JsonNode nameNode = function.get("name");
-                                        if (nameNode != null) {
+                                        if (hasTextValue(nameNode)) {
                                             entry.nameBuffer.append(nameNode.asText());
                                             entry.toolName = entry.nameBuffer.toString();
                                             notifyToolPreparing(result, entry);
                                         }
                                         JsonNode args = function.get("arguments");
-                                        if (args != null) entry.argsBuffer.append(args.asText());
+                                        if (hasTextValue(args)) entry.argsBuffer.append(args.asText());
                                     }
                                 }
                             }
@@ -495,6 +495,10 @@ public class OpenAIChatModel implements LLMModel {
     private int nestedFirstInt(JsonNode node, String objectName, String... names) {
         JsonNode child = node.get(objectName);
         return child == null || child.isNull() ? 0 : firstInt(child, names);
+    }
+
+    private boolean hasTextValue(JsonNode node) {
+        return node != null && !node.isNull();
     }
 
     /**
