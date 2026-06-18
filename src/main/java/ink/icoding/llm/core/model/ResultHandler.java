@@ -34,6 +34,18 @@ public interface ResultHandler {
     default void onTool(ToolDescriptor tool, ToolStatus status) {}
 
     /**
+     * 当工具执行发生异常时回调.
+     *
+     * @param tool  工具描述对象
+     * @param error 工具执行异常
+     */
+    default void onToolError(ToolDescriptor tool, Exception error) {
+        String toolName = tool == null ? "unknown" : tool.getName();
+        System.err.println("[Tool Error] " + toolName + ": " + error.getMessage());
+        error.printStackTrace(System.err);
+    }
+
+    /**
      * 当模型返回Token用量信息时回调.
      *
      * @param usage Token用量信息

@@ -31,11 +31,40 @@ public interface ToolExecutor {
      */
     @SuppressWarnings("unchecked")
     static String defaultExecute(Tool<?> tool, String paramJson, ToolDescriptor descriptor, ink.icoding.llm.core.model.ResultHandler handler) {
-        if (handler != null) handler.onTool(descriptor, ToolStatus.PREPARING);
-        if (handler != null) handler.onTool(descriptor, ToolStatus.CALLING);
-        Tool<ToolParam> typedTool = (Tool<ToolParam>) tool;
-        String result = typedTool.execute(ToolParam.fromJsonString(paramJson, descriptor.getParamClass()));
-        if (handler != null) handler.onTool(descriptor, ToolStatus.COMPLETED);
-        return result;
+        try {
+            if (handler != null) handler.onTool(descriptor, ToolStatus.PREPARING);
+            if (handler != null) handler.onTool(descriptor, ToolStatus.CALLING);
+            Tool<ToolParam> typedTool = (Tool<ToolParam>) tool;
+            String result = typedTool.execute(ToolParam.fromJsonString(paramJson, descriptor.getParamClass()));
+            if (handler != null) handler.onTool(descriptor, ToolStatus.COMPLETED);
+            return result;
+        } catch (Exception e) {
+            return handleToolError(descriptor, handler, e);
+        }
+    }
+
+    /**
+     * 处理工具执行异常, 避免异常冒泡中断Agent循环.
+     *
+     * @param descriptor 工具描述对象
+     * @param handler    结果回调处理器
+     * @param error      工具执行异常
+     * @return 反馈给LLM的工具错误结果
+     */
+    static String handleToolError(ToolDescriptor descriptor, ink.icoding.llm.core.model.ResultHandler handler, Exception error) {
+        if (handler != null) {
+            try {
+                handler.onToolError(descriptor, error);
+            } catch (Exception handlerError) {
+                System.err.println("[Tool Error Handler Failed] " + handlerError.getMessage());
+                handlerError.printStackTrace(System.err);
+            }
+        } else {
+            String toolName = descriptor == null ? "unknown" : descriptor.getName();
+            System.err.println("[Tool Error] " + toolName + ": " + error.getMessage());
+            error.printStackTrace(System.err);
+        }
+        String toolName = descriptor == null ? "unknown" : descriptor.getName();
+        return "Tool '" + toolName + "' failed: " + error.getMessage();
     }
 }

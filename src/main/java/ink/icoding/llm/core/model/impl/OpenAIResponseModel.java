@@ -252,8 +252,13 @@ public class OpenAIResponseModel implements LLMModel {
                 descriptor.setCallId(entry.callId);
                 descriptor.setInputParams(entry.argsJson);
 
-                String toolResult = toolExecutor.execute(entry.toolName, entry.argsJson, descriptor,
-                        suppressPreparing(result.getHandler()));
+                ResultHandler toolHandler = suppressPreparing(result.getHandler());
+                String toolResult;
+                try {
+                    toolResult = toolExecutor.execute(entry.toolName, entry.argsJson, descriptor, toolHandler);
+                } catch (Exception e) {
+                    toolResult = ToolExecutor.handleToolError(descriptor, toolHandler, e);
+                }
 
                 // Responses API使用function_call_output格式
                 ObjectNode outputItem = MAPPER.createObjectNode();
@@ -322,6 +327,11 @@ public class OpenAIResponseModel implements LLMModel {
             @Override
             public void onUsage(TokenUsage usage) {
                 handler.onUsage(usage);
+            }
+
+            @Override
+            public void onToolError(ToolDescriptor tool, Exception error) {
+                handler.onToolError(tool, error);
             }
         };
     }

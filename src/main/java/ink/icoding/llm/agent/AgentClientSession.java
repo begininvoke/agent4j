@@ -133,6 +133,15 @@ public class AgentClientSession {
                 }
 
                 @Override
+                public void onToolError(ToolDescriptor tool, Exception error) {
+                    if (result.getHandler() != null) {
+                        result.getHandler().onToolError(tool, error);
+                    } else {
+                        logToolError(tool, error);
+                    }
+                }
+
+                @Override
                 public void onUsage(TokenUsage usage) {
                     result.addUsage(usage);
                     lastContextTokens = Math.max(lastContextTokens, usage.getInputTokens());
@@ -260,6 +269,15 @@ public class AgentClientSession {
                     }
 
                     @Override
+                    public void onToolError(ToolDescriptor tool, Exception error) {
+                        if (agentHandler != null) {
+                            agentHandler.onToolError(tool, error);
+                        } else {
+                            logToolError(tool, error);
+                        }
+                    }
+
+                    @Override
                     public void onUsage(TokenUsage usage) {
                         if (agentHandler != null) agentHandler.onUsage(usage);
                     }
@@ -355,6 +373,15 @@ public class AgentClientSession {
                 }
 
                 @Override
+                public void onToolError(ToolDescriptor tool, Exception error) {
+                    if (agentHandler != null) {
+                        agentHandler.onToolError(tool, error);
+                    } else {
+                        logToolError(tool, error);
+                    }
+                }
+
+                @Override
                 public void onUsage(TokenUsage usage) {
                     if (agentHandler != null) agentHandler.onUsage(usage);
                 }
@@ -383,6 +410,12 @@ public class AgentClientSession {
             }
         }
         return null;
+    }
+
+    private void logToolError(ToolDescriptor tool, Exception error) {
+        String toolName = tool == null ? "unknown" : tool.getName();
+        System.err.println("[Tool Error] " + toolName + ": " + error.getMessage());
+        error.printStackTrace(System.err);
     }
 
     /**

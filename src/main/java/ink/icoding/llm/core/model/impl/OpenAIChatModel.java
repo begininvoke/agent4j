@@ -299,8 +299,13 @@ public class OpenAIChatModel implements LLMModel {
                 descriptor.setCallId(entry.callId);
                 descriptor.setInputParams(entry.argsBuffer.toString());
 
-                String toolResult = toolExecutor.execute(entry.toolName, entry.argsBuffer.toString(), descriptor,
-                        suppressPreparingIfAlreadyNotified(result.getHandler(), entry.preparingNotified));
+                ResultHandler toolHandler = suppressPreparingIfAlreadyNotified(result.getHandler(), entry.preparingNotified);
+                String toolResult;
+                try {
+                    toolResult = toolExecutor.execute(entry.toolName, entry.argsBuffer.toString(), descriptor, toolHandler);
+                } catch (Exception e) {
+                    toolResult = ToolExecutor.handleToolError(descriptor, toolHandler, e);
+                }
 
                 ObjectNode toolMsg = MAPPER.createObjectNode();
                 toolMsg.put("role", "tool");
@@ -385,6 +390,11 @@ public class OpenAIChatModel implements LLMModel {
             @Override
             public void onUsage(TokenUsage usage) {
                 handler.onUsage(usage);
+            }
+
+            @Override
+            public void onToolError(ToolDescriptor tool, Exception error) {
+                handler.onToolError(tool, error);
             }
         };
     }
