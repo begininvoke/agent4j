@@ -30,6 +30,7 @@ public class AgentClient {
     private String description;
     private List<Tool> tools = new ArrayList<>();
     private List<Skill> skills = new ArrayList<>();
+    private boolean llmRequestDebugEnabled;
 
     /**
      * 创建新的会话.
@@ -51,7 +52,12 @@ public class AgentClient {
     }
 
     public LLMModel getModel() { return model; }
-    public void setModel(LLMModel model) { this.model = model; }
+    public void setModel(LLMModel model) {
+        this.model = model;
+        if (this.model != null) {
+            this.model.setRequestDebugEnabled(llmRequestDebugEnabled);
+        }
+    }
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
     public String getDescription() { return description; }
@@ -60,4 +66,11 @@ public class AgentClient {
     public void setTools(List<Tool> tools) { this.tools = tools; }
     public List<Skill> getSkills() { return skills; }
     public void setSkills(List<Skill> skills) { this.skills = skills; }
+    public boolean isLlmRequestDebugEnabled() { return llmRequestDebugEnabled; }
+    public void setLlmRequestDebugEnabled(boolean llmRequestDebugEnabled) {
+        this.llmRequestDebugEnabled = llmRequestDebugEnabled;
+        if (this.model != null) {
+            this.model.setRequestDebugEnabled(llmRequestDebugEnabled);
+        }
+    }
 }

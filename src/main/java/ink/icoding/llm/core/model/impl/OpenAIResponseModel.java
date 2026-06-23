@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import ink.icoding.llm.core.entity.Message;
 import ink.icoding.llm.core.entity.MessageAttachment;
+import ink.icoding.llm.core.entity.MessageToolCall;
 import ink.icoding.llm.core.model.LLMModel;
+import ink.icoding.llm.core.model.LLMRequestDebugLogger;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
 import ink.icoding.llm.core.model.TokenUsage;
@@ -41,6 +43,7 @@ public class OpenAIResponseModel implements LLMModel {
     private final String apiKey;
     private final OkHttpClient client;
     private final Map<String, Tool> toolMap = new ConcurrentHashMap<>();
+    private boolean requestDebugEnabled;
 
     /**
      * 构造OpenAI Responses模型实例.
@@ -50,14 +53,29 @@ public class OpenAIResponseModel implements LLMModel {
      * @param apiKey    API密钥
      */
     public OpenAIResponseModel(String baseUrl, String modelName, String apiKey) {
+        this(baseUrl, modelName, apiKey, false);
+    }
+
+    public OpenAIResponseModel(String baseUrl, String modelName, String apiKey, boolean requestDebugEnabled) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.modelName = modelName;
         this.apiKey = apiKey;
+        this.requestDebugEnabled = requestDebugEnabled;
         this.client = new OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
                 .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build();
+    }
+
+    @Override
+    public void setRequestDebugEnabled(boolean enabled) {
+        this.requestDebugEnabled = enabled;
+    }
+
+    @Override
+    public boolean isRequestDebugEnabled() {
+        return requestDebugEnabled;
     }
 
     /** {@inheritDoc} */
@@ -107,6 +125,7 @@ public class OpenAIResponseModel implements LLMModel {
                     .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
                     .header("Authorization", "Bearer " + apiKey)
                     .build();
+            LLMRequestDebugLogger.log(requestDebugEnabled, request, body.toString());
 
             EventSource.Factory factory = EventSources.createFactory(client);
             factory.newEventSource(request, new EventSourceListener() {
@@ -223,27 +242,21 @@ public class OpenAIResponseModel implements LLMModel {
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
                                              String content, String think, List<ToolCallEntry> toolCalls) {
         try {
-            if ((content != null && !content.isEmpty()) || (think != null && !think.isEmpty())) {
-                Message assistantMessage = Message.fromAssistant();
-                if (content != null && !content.isEmpty()) {
-                    assistantMessage.appendContent(content);
-                }
-                if (think != null && !think.isEmpty()) {
-                    assistantMessage.appendThink(think);
-                }
+            Message assistantMessage = Message.fromAssistant();
+            if (content != null && !content.isEmpty()) {
+                assistantMessage.appendContent(content);
+            }
+            if (think != null && !think.isEmpty()) {
+                assistantMessage.appendThink(think);
+            }
+            for (ToolCallEntry entry : toolCalls) {
+                assistantMessage.appendToolCall(entry.callId, entry.toolName, entry.argsJson);
+            }
+            if ((assistantMessage.getContent() != null && !assistantMessage.getContent().isEmpty())
+                    || (assistantMessage.getThink() != null && !assistantMessage.getThink().isEmpty())
+                    || (assistantMessage.getToolCalls() != null && !assistantMessage.getToolCalls().isEmpty())) {
                 messages.add(assistantMessage);
                 result.addAppendedMessage(assistantMessage);
-            }
-
-            for (ToolCallEntry entry : toolCalls) {
-                ObjectNode callItem = MAPPER.createObjectNode();
-                callItem.put("type", "function_call");
-                callItem.put("call_id", entry.callId);
-                callItem.put("name", entry.toolName);
-                callItem.put("arguments", entry.argsJson);
-                Message callMessage = Message.fromAssistant(callItem.toString());
-                messages.add(callMessage);
-                result.addAppendedMessage(callMessage);
             }
 
             // 执行每个工具调用并添加function_call_output
@@ -260,12 +273,7 @@ public class OpenAIResponseModel implements LLMModel {
                     toolResult = ToolExecutor.handleToolError(descriptor, toolHandler, e);
                 }
 
-                // Responses API使用function_call_output格式
-                ObjectNode outputItem = MAPPER.createObjectNode();
-                outputItem.put("type", "function_call_output");
-                outputItem.put("call_id", entry.callId);
-                outputItem.put("output", toolResult);
-                Message toolMessage = Message.fromTool(outputItem.toString());
+                Message toolMessage = Message.fromTool().withToolResult(entry.callId, toolResult);
                 messages.add(toolMessage);
                 result.addAppendedMessage(toolMessage);
             }
@@ -360,15 +368,11 @@ public class OpenAIResponseModel implements LLMModel {
 
         ArrayNode inputArray = MAPPER.createArrayNode();
         for (Message msg : messages) {
-            if (msg.getContent() != null && msg.getContent().startsWith("{")) {
-                try {
-                    JsonNode parsed = MAPPER.readTree(msg.getContent());
-                    if (parsed.has("role") || parsed.has("type")) {
-                        inputArray.add(parsed);
-                        continue;
-                    }
-                } catch (Exception ignored) {
-                }
+            if (appendNeutralMessage(inputArray, msg)) {
+                continue;
+            }
+            if (isLegacyStructuredHistory(msg)) {
+                continue;
             }
             inputArray.add(buildTextItem(msg));
         }
@@ -389,6 +393,46 @@ public class OpenAIResponseModel implements LLMModel {
         }
 
         return body;
+    }
+
+    private boolean appendNeutralMessage(ArrayNode inputArray, Message msg) {
+        boolean appended = false;
+        if (msg.getRole() == Message.Role.assistant
+                && msg.getContent() != null && !msg.getContent().isEmpty()
+                && !looksLikeStructuredJson(msg.getContent())) {
+            inputArray.add(buildTextItem(msg));
+            appended = true;
+        }
+        if (msg.getRole() == Message.Role.assistant
+                && msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
+            for (MessageToolCall call : msg.getToolCalls()) {
+                ObjectNode callItem = MAPPER.createObjectNode();
+                callItem.put("type", "function_call");
+                callItem.put("call_id", call.getId());
+                callItem.put("name", call.getName());
+                callItem.put("arguments", call.getArgumentsJson());
+                inputArray.add(callItem);
+            }
+            appended = true;
+        }
+        if (msg.getRole() == Message.Role.tool && msg.getToolResult() != null) {
+            ObjectNode outputItem = MAPPER.createObjectNode();
+            outputItem.put("type", "function_call_output");
+            outputItem.put("call_id", msg.getToolResult().getToolCallId());
+            outputItem.put("output", msg.getToolResult().getContent());
+            inputArray.add(outputItem);
+            appended = true;
+        }
+        return appended;
+    }
+
+    private boolean looksLikeStructuredJson(String content) {
+        return content != null && content.stripLeading().startsWith("{");
+    }
+
+    private boolean isLegacyStructuredHistory(Message msg) {
+        return msg.getRole() != Message.Role.user
+                && looksLikeStructuredJson(msg.getContent());
     }
 
     /**

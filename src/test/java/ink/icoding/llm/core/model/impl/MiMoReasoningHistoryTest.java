@@ -141,6 +141,55 @@ class MiMoReasoningHistoryTest {
         assertTrue((Boolean) method.invoke(null, new StreamResetException(ErrorCode.CANCEL)));
         assertFalse((Boolean) method.invoke(null, new StreamResetException(ErrorCode.REFUSED_STREAM)));
     }
+
+    @Test
+    void openAIResponseDropsLegacyChatToolMessages() throws Exception {
+        OpenAIResponseModel model = new OpenAIResponseModel("https://example.com", "gpt-4.1", "test-key");
+        Method method = OpenAIResponseModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        method.setAccessible(true);
+
+        Message assistantToolCall = Message.fromAssistant("""
+                {"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}
+                """.trim());
+        Message toolResult = Message.fromTool("""
+                {"role":"tool","tool_call_id":"call_1","content":"result"}
+                """.trim());
+
+        ObjectNode body = (ObjectNode) method.invoke(model, List.of(assistantToolCall, toolResult), List.of());
+        JsonNode input = body.get("input");
+
+        assertEquals(0, input.size());
+    }
+
+    @Test
+    void neutralToolHistoryCanBuildAllProtocols() throws Exception {
+        Message assistant = Message.fromAssistant("checking")
+                .appendToolCall("call_1", "search", "{\"q\":\"java\"}");
+        Message tool = Message.fromTool().withToolResult("call_1", "result");
+
+        Method chatMethod = OpenAIChatModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        chatMethod.setAccessible(true);
+        ObjectNode chatBody = (ObjectNode) chatMethod.invoke(
+                new OpenAIChatModel("https://example.com", "gpt-4.1", "test-key"),
+                List.of(assistant, tool), List.of());
+        assertTrue(chatBody.get("messages").get(0).has("tool_calls"));
+        assertEquals("tool", chatBody.get("messages").get(1).get("role").asText());
+
+        Method responseMethod = OpenAIResponseModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        responseMethod.setAccessible(true);
+        ObjectNode responseBody = (ObjectNode) responseMethod.invoke(
+                new OpenAIResponseModel("https://example.com", "gpt-4.1", "test-key"),
+                List.of(assistant, tool), List.of());
+        assertEquals("output_text", responseBody.get("input").get(0).get("content").get(0).get("type").asText());
+        assertEquals("function_call", responseBody.get("input").get(1).get("type").asText());
+        assertEquals("function_call_output", responseBody.get("input").get(2).get("type").asText());
+
+        Method anthropicMethod = AnthropicModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        anthropicMethod.setAccessible(true);
+        ObjectNode anthropicBody = (ObjectNode) anthropicMethod.invoke(
+                new AnthropicModel("https://example.com", "claude-sonnet-4", "test-key"),
+                List.of(assistant, tool), List.of());
+        assertEquals("tool_use", anthropicBody.get("messages").get(0).get("content").get(1).get("type").asText());
+        assertEquals("tool_result", anthropicBody.get("messages").get(1).get("content").get(0).get("type").asText());
+    }
 }
-
-

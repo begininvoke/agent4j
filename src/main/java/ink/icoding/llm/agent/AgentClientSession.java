@@ -43,7 +43,7 @@ import java.util.stream.Collectors;
 public class AgentClientSession {
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-    private static final int CONTEXT_SUMMARY_TRIGGER_TOKENS = 100_000;
+    private static final int DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS = 100_000;
     private static final int MEMORY_SUMMARY_MAX_TOKENS = 5_000;
 
     private final AgentClient agent;
@@ -54,6 +54,8 @@ public class AgentClientSession {
     private final CreateSubAgentTool createSubAgentTool = new CreateSubAgentTool();
     private String memorySummary;
     private int lastContextTokens;
+    private int contextSummaryTriggerTokens = DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS;
+    private int contextSummaryTriggerRounds;
 
     /**
      * 构造会话实例.
@@ -471,7 +473,7 @@ public class AgentClientSession {
     }
 
     private void summarizeHistoryIfNeeded(AgentSessionResult result) {
-        if (lastContextTokens < CONTEXT_SUMMARY_TRIGGER_TOKENS || history.isEmpty()) {
+        if (!shouldSummarizeHistory() || history.isEmpty()) {
             return;
         }
         int beforeTokens = lastContextTokens;
@@ -494,6 +496,24 @@ public class AgentClientSession {
         if (handler != null) {
             handler.onContextCompression(ContextCompressionStatus.COMPLETED, beforeTokens, afterTokens);
         }
+    }
+
+    private boolean shouldSummarizeHistory() {
+        boolean tokenLimitReached = contextSummaryTriggerTokens > 0
+                && lastContextTokens >= contextSummaryTriggerTokens;
+        boolean roundLimitReached = contextSummaryTriggerRounds > 0
+                && countHistoryRounds() >= contextSummaryTriggerRounds;
+        return tokenLimitReached || roundLimitReached;
+    }
+
+    private int countHistoryRounds() {
+        int rounds = 0;
+        for (Message msg : history) {
+            if (msg.getRole() == Message.Role.user) {
+                rounds++;
+            }
+        }
+        return rounds;
     }
 
     private SummaryResult summarizeHistory() {
@@ -659,6 +679,8 @@ public class AgentClientSession {
             data.setHistory(new ArrayList<>(history));
             data.setMemorySummary(memorySummary);
             data.setLastContextTokens(lastContextTokens);
+            data.setContextSummaryTriggerTokens(contextSummaryTriggerTokens);
+            data.setContextSummaryTriggerRounds(contextSummaryTriggerRounds);
             data.setSubAgents(subAgents.stream()
                     .map(AgentClient::getName)
                     .collect(Collectors.toList()));
@@ -685,6 +707,8 @@ public class AgentClientSession {
             session.getPlans().addAll(data.getPlans());
             session.memorySummary = data.getMemorySummary();
             session.lastContextTokens = data.getLastContextTokens();
+            session.contextSummaryTriggerTokens = data.getContextSummaryTriggerTokens();
+            session.contextSummaryTriggerRounds = data.getContextSummaryTriggerRounds();
             return session;
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to deserialize session", e);
@@ -706,6 +730,24 @@ public class AgentClientSession {
     /** 获取最近记录到的上下文Token量 */
     public int getLastContextTokens() { return lastContextTokens; }
 
+    /** 获取触发上下文压缩的Token阈值; 小于等于0表示关闭Token限制 */
+    public int getContextSummaryTriggerTokens() { return contextSummaryTriggerTokens; }
+
+    /** 设置触发上下文压缩的Token阈值; 小于等于0表示关闭Token限制 */
+    public AgentClientSession setContextSummaryTriggerTokens(int contextSummaryTriggerTokens) {
+        this.contextSummaryTriggerTokens = contextSummaryTriggerTokens;
+        return this;
+    }
+
+    /** 获取触发上下文压缩的对话轮数阈值; 小于等于0表示关闭轮数限制 */
+    public int getContextSummaryTriggerRounds() { return contextSummaryTriggerRounds; }
+
+    /** 设置触发上下文压缩的对话轮数阈值; 小于等于0表示关闭轮数限制 */
+    public AgentClientSession setContextSummaryTriggerRounds(int contextSummaryTriggerRounds) {
+        this.contextSummaryTriggerRounds = contextSummaryTriggerRounds;
+        return this;
+    }
+
     /**
      * 序列化数据内部类.
      */
@@ -715,6 +757,8 @@ public class AgentClientSession {
         private List<Plan> plans = new ArrayList<>();
         private String memorySummary;
         private int lastContextTokens;
+        private int contextSummaryTriggerTokens = DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS;
+        private int contextSummaryTriggerRounds;
 
         public List<Message> getHistory() { return history; }
         public void setHistory(List<Message> history) { this.history = history; }
@@ -726,5 +770,9 @@ public class AgentClientSession {
         public void setMemorySummary(String memorySummary) { this.memorySummary = memorySummary; }
         public int getLastContextTokens() { return lastContextTokens; }
         public void setLastContextTokens(int lastContextTokens) { this.lastContextTokens = lastContextTokens; }
+        public int getContextSummaryTriggerTokens() { return contextSummaryTriggerTokens; }
+        public void setContextSummaryTriggerTokens(int contextSummaryTriggerTokens) { this.contextSummaryTriggerTokens = contextSummaryTriggerTokens; }
+        public int getContextSummaryTriggerRounds() { return contextSummaryTriggerRounds; }
+        public void setContextSummaryTriggerRounds(int contextSummaryTriggerRounds) { this.contextSummaryTriggerRounds = contextSummaryTriggerRounds; }
     }
 }

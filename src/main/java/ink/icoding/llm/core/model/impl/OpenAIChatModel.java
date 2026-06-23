@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import ink.icoding.llm.core.entity.Message;
 import ink.icoding.llm.core.entity.MessageAttachment;
+import ink.icoding.llm.core.entity.MessageToolCall;
 import ink.icoding.llm.core.model.LLMModel;
+import ink.icoding.llm.core.model.LLMRequestDebugLogger;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
 import ink.icoding.llm.core.model.TokenUsage;
@@ -40,6 +42,7 @@ public class OpenAIChatModel implements LLMModel {
     private final String apiKey;
     private final OkHttpClient client;
     private final Map<String, Tool> toolMap = new ConcurrentHashMap<>();
+    private boolean requestDebugEnabled;
 
     /**
      * 构造OpenAI Chat模型实例.
@@ -49,14 +52,29 @@ public class OpenAIChatModel implements LLMModel {
      * @param apiKey    API密钥
      */
     public OpenAIChatModel(String baseUrl, String modelName, String apiKey) {
+        this(baseUrl, modelName, apiKey, false);
+    }
+
+    public OpenAIChatModel(String baseUrl, String modelName, String apiKey, boolean requestDebugEnabled) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.modelName = modelName;
         this.apiKey = apiKey;
+        this.requestDebugEnabled = requestDebugEnabled;
         this.client = new OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
                 .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build();
+    }
+
+    @Override
+    public void setRequestDebugEnabled(boolean enabled) {
+        this.requestDebugEnabled = enabled;
+    }
+
+    @Override
+    public boolean isRequestDebugEnabled() {
+        return requestDebugEnabled;
     }
 
     /** {@inheritDoc} */
@@ -110,6 +128,7 @@ public class OpenAIChatModel implements LLMModel {
                     .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
                     .header("Authorization", "Bearer " + apiKey)
                     .build();
+            LLMRequestDebugLogger.log(requestDebugEnabled, request, body.toString());
 
             EventSource.Factory factory = EventSources.createFactory(client);
             factory.newEventSource(request, new EventSourceListener() {
@@ -259,36 +278,17 @@ public class OpenAIChatModel implements LLMModel {
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
                                              String content, String think, List<ToolCallEntry> toolCalls) {
         try {
-            // 添加assistant消息(含工具调用)
-            ObjectNode assistantMsg = MAPPER.createObjectNode();
-            assistantMsg.put("role", "assistant");
+            // 添加协议无关的assistant消息(含工具调用)
+            Message assistantMessage = Message.fromAssistant();
             if (content != null && !content.isEmpty()) {
-                assistantMsg.put("content", content);
-            } else {
-                assistantMsg.putNull("content");
+                assistantMessage.appendContent(content);
             }
-            if (think != null && !think.isEmpty()) {
-                if (isMiMoModel()){
-                    // MiMo模型的上下文中带上reasoning字段
-                    assistantMsg.put("reasoning_content", think);
-                }
-            }
-            ArrayNode toolCallsArray = MAPPER.createArrayNode();
-            for (int i = 0; i < toolCalls.size(); i++) {
-                ToolCallEntry entry = toolCalls.get(i);
-                ObjectNode tc = MAPPER.createObjectNode();
-                tc.put("id", entry.callId);
-                tc.put("type", "function");
-                ObjectNode fn = MAPPER.createObjectNode();
-                fn.put("name", entry.toolName);
-                fn.put("arguments", entry.argsBuffer.toString());
-                tc.set("function", fn);
-                toolCallsArray.add(tc);
-            }
-            assistantMsg.set("tool_calls", toolCallsArray);
-            Message assistantMessage = Message.fromAssistant(assistantMsg.toString());
             if (think != null && !think.isEmpty()) {
                 assistantMessage.appendThink(think);
+            }
+            for (int i = 0; i < toolCalls.size(); i++) {
+                ToolCallEntry entry = toolCalls.get(i);
+                assistantMessage.appendToolCall(entry.callId, entry.toolName, entry.argsBuffer.toString());
             }
             messages.add(assistantMessage);
             result.addAppendedMessage(assistantMessage);
@@ -307,11 +307,7 @@ public class OpenAIChatModel implements LLMModel {
                     toolResult = ToolExecutor.handleToolError(descriptor, toolHandler, e);
                 }
 
-                ObjectNode toolMsg = MAPPER.createObjectNode();
-                toolMsg.put("role", "tool");
-                toolMsg.put("tool_call_id", entry.callId);
-                toolMsg.put("content", toolResult);
-                Message toolMessage = Message.fromTool(toolMsg.toString());
+                Message toolMessage = Message.fromTool().withToolResult(entry.callId, toolResult);
                 messages.add(toolMessage);
                 result.addAppendedMessage(toolMessage);
             }
@@ -416,15 +412,11 @@ public class OpenAIChatModel implements LLMModel {
 
         ArrayNode messagesArray = MAPPER.createArrayNode();
         for (Message msg : messages) {
-            // 检查是否是结构化JSON消息(来自Agent循环的工具调用)
-            if (msg.getContent() != null && msg.getContent().startsWith("{")) {
-                try {
-                    JsonNode parsed = MAPPER.readTree(msg.getContent());
-                    if (parsed.has("role")) {
-                        messagesArray.add(parsed);
-                        continue;
-                    }
-                } catch (Exception ignored) {}
+            if (appendNeutralMessage(messagesArray, msg)) {
+                continue;
+            }
+            if (isLegacyStructuredHistory(msg)) {
+                continue;
             }
 
             ObjectNode msgNode = MAPPER.createObjectNode();
@@ -467,6 +459,51 @@ public class OpenAIChatModel implements LLMModel {
         }
 
         return body;
+    }
+
+    private boolean appendNeutralMessage(ArrayNode messagesArray, Message msg) {
+        if (msg.getRole() == Message.Role.assistant
+                && msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
+            ObjectNode assistantMsg = MAPPER.createObjectNode();
+            assistantMsg.put("role", "assistant");
+            if (msg.getContent() != null && !msg.getContent().isEmpty()) {
+                assistantMsg.put("content", msg.getContent());
+            } else {
+                assistantMsg.putNull("content");
+            }
+            if (isMiMoModel() && msg.getThink() != null && !msg.getThink().isEmpty()) {
+                assistantMsg.put("reasoning_content", msg.getThink());
+            }
+            ArrayNode toolCallsArray = MAPPER.createArrayNode();
+            for (MessageToolCall call : msg.getToolCalls()) {
+                ObjectNode tc = MAPPER.createObjectNode();
+                tc.put("id", call.getId());
+                tc.put("type", "function");
+                ObjectNode fn = MAPPER.createObjectNode();
+                fn.put("name", call.getName());
+                fn.put("arguments", call.getArgumentsJson());
+                tc.set("function", fn);
+                toolCallsArray.add(tc);
+            }
+            assistantMsg.set("tool_calls", toolCallsArray);
+            messagesArray.add(assistantMsg);
+            return true;
+        }
+        if (msg.getRole() == Message.Role.tool && msg.getToolResult() != null) {
+            ObjectNode toolMsg = MAPPER.createObjectNode();
+            toolMsg.put("role", "tool");
+            toolMsg.put("tool_call_id", msg.getToolResult().getToolCallId());
+            toolMsg.put("content", msg.getToolResult().getContent());
+            messagesArray.add(toolMsg);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isLegacyStructuredHistory(Message msg) {
+        return msg.getRole() != Message.Role.user
+                && msg.getContent() != null
+                && msg.getContent().stripLeading().startsWith("{");
     }
 
     private TokenUsage parseTokenUsage(JsonNode json) {

@@ -29,12 +29,40 @@ public interface LLMModel {
      * @return 对应类型的LLMModel实例
      */
     static LLMModel create(ModelType type, String baseUrl, String modelName, String apiKey) {
+        return create(type, baseUrl, modelName, apiKey, false);
+    }
+
+    /**
+     * 工厂方法, 根据模型类型创建对应的LLM实例.
+     *
+     * @param type                模型类型枚举
+     * @param baseUrl             API基础地址
+     * @param modelName           模型名称
+     * @param apiKey              API密钥
+     * @param requestDebugEnabled 是否输出LLM请求DEBUG日志
+     * @return 对应类型的LLMModel实例
+     */
+    static LLMModel create(ModelType type, String baseUrl, String modelName, String apiKey, boolean requestDebugEnabled) {
         return switch (type) {
-            case OpenAI -> new OpenAIChatModel(baseUrl, modelName, apiKey);
-            case Anthropic -> new AnthropicModel(baseUrl, modelName, apiKey);
-            case OpenAIResponse -> new OpenAIResponseModel(baseUrl, modelName, apiKey);
+            case OpenAI -> new OpenAIChatModel(baseUrl, modelName, apiKey, requestDebugEnabled);
+            case Anthropic -> new AnthropicModel(baseUrl, modelName, apiKey, requestDebugEnabled);
+            case OpenAIResponse -> new OpenAIResponseModel(baseUrl, modelName, apiKey, requestDebugEnabled);
         };
     }
+
+    /**
+     * 设置是否输出LLM请求DEBUG日志.
+     *
+     * @param enabled 是否开启
+     */
+    default void setRequestDebugEnabled(boolean enabled) {}
+
+    /**
+     * 是否输出LLM请求DEBUG日志.
+     *
+     * @return 是否开启
+     */
+    default boolean isRequestDebugEnabled() { return false; }
 
     /**
      * 发送单条消息并返回结果.

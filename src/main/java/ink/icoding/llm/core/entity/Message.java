@@ -20,6 +20,9 @@ public class Message {
     private String content;
     private List<MessageAttachment> attachments = new ArrayList<>();
     private String think;
+    private String thinkSignature;
+    private List<MessageToolCall> toolCalls = new ArrayList<>();
+    private MessageToolResult toolResult;
     private Role role;
 
     /**
@@ -95,6 +98,15 @@ public class Message {
     }
 
     /**
+     * 创建空的工具返回消息.
+     *
+     * @return 消息对象
+     */
+    public static Message fromTool() {
+        return new Message(Role.tool);
+    }
+
+    /**
      * 追加文本内容.
      *
      * @param content 要追加的文本
@@ -158,12 +170,35 @@ public class Message {
         return this;
     }
 
+    /**
+     * 追加工具调用记录.
+     */
+    public Message appendToolCall(String id, String name, String argumentsJson) {
+        this.toolCalls.add(new MessageToolCall(id, name, argumentsJson));
+        return this;
+    }
+
+    /**
+     * 设置工具返回记录.
+     */
+    public Message withToolResult(String toolCallId, String content) {
+        this.toolResult = new MessageToolResult(toolCallId, content);
+        this.content = content;
+        return this;
+    }
+
     public String getContent() { return content; }
     public void setContent(String content) { this.content = content; }
     public List<MessageAttachment> getAttachments() { return attachments; }
     public void setAttachments(List<MessageAttachment> attachments) { this.attachments = attachments; }
     public String getThink() { return think; }
     public void setThink(String think) { this.think = think; }
+    public String getThinkSignature() { return thinkSignature; }
+    public void setThinkSignature(String thinkSignature) { this.thinkSignature = thinkSignature; }
+    public List<MessageToolCall> getToolCalls() { return toolCalls; }
+    public void setToolCalls(List<MessageToolCall> toolCalls) { this.toolCalls = toolCalls; }
+    public MessageToolResult getToolResult() { return toolResult; }
+    public void setToolResult(MessageToolResult toolResult) { this.toolResult = toolResult; }
     public Role getRole() { return role; }
     public void setRole(Role role) { this.role = role; }
 }

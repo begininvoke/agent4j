@@ -144,6 +144,59 @@ class AgentClientSessionHistoryTest {
         assertEquals(19, events.get(1).afterTokens());
     }
 
+    @Test
+    void historyIsSummarizedWhenRoundLimitIsReached() {
+        RoundSummaryModel model = new RoundSummaryModel();
+
+        AgentClient agent = new AgentClient();
+        agent.setName("TestAgent");
+        agent.setModel(model);
+
+        AgentClientSession session = agent.createSession()
+                .setContextSummaryTriggerTokens(0)
+                .setContextSummaryTriggerRounds(2);
+
+        session.command("第一轮").execute();
+        assertEquals(2, session.getHistory().size());
+
+        session.command("第二轮").execute();
+
+        assertEquals(0, session.getHistory().size());
+        assertEquals("轮数记忆", session.getMemorySummary());
+        assertEquals(0, session.getLastContextTokens());
+    }
+
+    @Test
+    void contextSummaryLimitsAreSerializedWithSession() {
+        AgentClient agent = new AgentClient();
+        agent.setName("TestAgent");
+        agent.setModel(new UsageModel(10));
+
+        AgentClientSession session = agent.createSession()
+                .setContextSummaryTriggerTokens(0)
+                .setContextSummaryTriggerRounds(3);
+
+        AgentClientSession restored = AgentClientSession.fromSerialization(session.serialization(), agent);
+
+        assertEquals(0, restored.getContextSummaryTriggerTokens());
+        assertEquals(3, restored.getContextSummaryTriggerRounds());
+    }
+
+    @Test
+    void agentClientPropagatesRequestDebugFlagToModel() {
+        UsageModel model = new UsageModel(10);
+        AgentClient agent = new AgentClient();
+
+        agent.setLlmRequestDebugEnabled(true);
+        agent.setModel(model);
+
+        assertEquals(true, model.isRequestDebugEnabled());
+
+        agent.setLlmRequestDebugEnabled(false);
+
+        assertEquals(false, model.isRequestDebugEnabled());
+    }
+
     private record TurnResponse(String content, String think) {}
     private record CompressionEvent(ContextCompressionStatus status, int beforeTokens, int afterTokens) {}
 
@@ -238,6 +291,7 @@ class AgentClientSessionHistoryTest {
 
     private static class UsageModel implements LLMModel {
         private final int inputTokens;
+        private boolean requestDebugEnabled;
 
         private UsageModel(int inputTokens) {
             this.inputTokens = inputTokens;
@@ -265,6 +319,16 @@ class AgentClientSessionHistoryTest {
                 result.addAppendedMessage(Message.fromAssistant("回复"));
                 result.complete("回复");
             });
+        }
+
+        @Override
+        public void setRequestDebugEnabled(boolean enabled) {
+            this.requestDebugEnabled = enabled;
+        }
+
+        @Override
+        public boolean isRequestDebugEnabled() {
+            return requestDebugEnabled;
         }
     }
 
@@ -300,6 +364,42 @@ class AgentClientSessionHistoryTest {
                 result.addUsage(new TokenUsage(1234, 19, 1253));
                 result.addAppendedMessage(Message.fromAssistant("重要记忆"));
                 result.complete("重要记忆");
+            });
+        }
+    }
+
+    private static class RoundSummaryModel implements LLMModel {
+        private int calls;
+
+        @Override
+        public LLMResult ask(Message message) {
+            return ask(List.of(message));
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages) {
+            return ask(messages, List.of());
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools) {
+            return ask(messages, tools, (toolName, paramJson, descriptor, handler) -> "ok");
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
+            calls++;
+            if (calls <= 2) {
+                int current = calls;
+                return new LLMResult(result -> {
+                    result.addAppendedMessage(Message.fromAssistant("回复" + current));
+                    result.complete("回复" + current);
+                });
+            }
+            return new LLMResult(result -> {
+                result.addUsage(new TokenUsage(100, 7, 107));
+                result.addAppendedMessage(Message.fromAssistant("轮数记忆"));
+                result.complete("轮数记忆");
             });
         }
     }

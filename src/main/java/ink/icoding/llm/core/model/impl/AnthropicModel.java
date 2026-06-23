@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import ink.icoding.llm.core.entity.Message;
 import ink.icoding.llm.core.entity.MessageAttachment;
+import ink.icoding.llm.core.entity.MessageToolCall;
 import ink.icoding.llm.core.model.LLMModel;
+import ink.icoding.llm.core.model.LLMRequestDebugLogger;
 import ink.icoding.llm.core.model.LLMResult;
 import ink.icoding.llm.core.model.ResultHandler;
 import ink.icoding.llm.core.model.TokenUsage;
@@ -40,6 +42,7 @@ public class AnthropicModel implements LLMModel {
     private final String apiKey;
     private final OkHttpClient client;
     private final Map<String, Tool> toolMap = new ConcurrentHashMap<>();
+    private boolean requestDebugEnabled;
 
     /**
      * 构造Anthropic模型实例.
@@ -49,14 +52,29 @@ public class AnthropicModel implements LLMModel {
      * @param apiKey    API密钥
      */
     public AnthropicModel(String baseUrl, String modelName, String apiKey) {
+        this(baseUrl, modelName, apiKey, false);
+    }
+
+    public AnthropicModel(String baseUrl, String modelName, String apiKey, boolean requestDebugEnabled) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.modelName = modelName;
         this.apiKey = apiKey;
+        this.requestDebugEnabled = requestDebugEnabled;
         this.client = new OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
                 .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .build();
+    }
+
+    @Override
+    public void setRequestDebugEnabled(boolean enabled) {
+        this.requestDebugEnabled = enabled;
+    }
+
+    @Override
+    public boolean isRequestDebugEnabled() {
+        return requestDebugEnabled;
     }
 
     /** {@inheritDoc} */
@@ -107,6 +125,7 @@ public class AnthropicModel implements LLMModel {
                     .header("x-api-key", apiKey)
                     .header("anthropic-version", "2023-06-01")
                     .build();
+            LLMRequestDebugLogger.log(requestDebugEnabled, request, body.toString());
 
             EventSource.Factory factory = EventSources.createFactory(client);
             factory.newEventSource(request, new EventSourceListener() {
@@ -257,10 +276,19 @@ public class AnthropicModel implements LLMModel {
                                              String content, String think, String thinkSignature,
                                              List<ToolCallEntry> toolCalls) {
         try {
-            // 添加assistant消息
-            Message assistantMessage = Message.fromAssistant(buildAssistantMessage(content, think, thinkSignature, toolCalls));
+            // 添加协议无关的assistant消息
+            Message assistantMessage = Message.fromAssistant();
+            if (content != null && !content.isEmpty()) {
+                assistantMessage.appendContent(content);
+            }
             if (think != null && !think.isEmpty()) {
                 assistantMessage.appendThink(think);
+            }
+            if (thinkSignature != null && !thinkSignature.isEmpty()) {
+                assistantMessage.setThinkSignature(thinkSignature);
+            }
+            for (ToolCallEntry entry : toolCalls) {
+                assistantMessage.appendToolCall(entry.callId, entry.toolName, entry.argsJson);
             }
             messages.add(assistantMessage);
             result.addAppendedMessage(assistantMessage);
@@ -282,10 +310,11 @@ public class AnthropicModel implements LLMModel {
                 toolResults.add(toolResult);
             }
 
-            // Anthropic: 工具结果作为user消息中的tool_result内容块
-            Message toolMessage = Message.fromTool(buildToolResultMessage(toolCalls, toolResults));
-            messages.add(toolMessage);
-            result.addAppendedMessage(toolMessage);
+            for (int i = 0; i < toolCalls.size(); i++) {
+                Message toolMessage = Message.fromTool().withToolResult(toolCalls.get(i).callId, toolResults.get(i));
+                messages.add(toolMessage);
+                result.addAppendedMessage(toolMessage);
+            }
 
             // 继续Agent循环
             executeAgentLoop(result, messages, tools, toolExecutor);
@@ -440,15 +469,11 @@ public class AnthropicModel implements LLMModel {
 
         ArrayNode messagesArray = MAPPER.createArrayNode();
         for (Message msg : messages) {
-            // 检查是否是结构化JSON消息(来自Agent循环的工具调用)
-            if (msg.getContent() != null && msg.getContent().startsWith("{")) {
-                try {
-                    JsonNode parsed = MAPPER.readTree(msg.getContent());
-                    if (parsed.has("role")) {
-                        messagesArray.add(parsed);
-                        continue;
-                    }
-                } catch (Exception ignored) {}
+            if (appendNeutralMessage(messagesArray, msg)) {
+                continue;
+            }
+            if (isLegacyStructuredHistory(msg)) {
+                continue;
             }
 
             ObjectNode msgNode = MAPPER.createObjectNode();
@@ -497,6 +522,76 @@ public class AnthropicModel implements LLMModel {
         }
 
         return body;
+    }
+
+    private boolean appendNeutralMessage(ArrayNode messagesArray, Message msg) {
+        if (msg.getRole() == Message.Role.assistant
+                && msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
+            ObjectNode msgNode = MAPPER.createObjectNode();
+            msgNode.put("role", "assistant");
+            ArrayNode contentArray = MAPPER.createArrayNode();
+            appendThinkingBlock(contentArray, msg.getThink(), msg.getThinkSignature());
+            if (msg.getContent() != null && !msg.getContent().isEmpty()) {
+                ObjectNode textBlock = MAPPER.createObjectNode();
+                textBlock.put("type", "text");
+                textBlock.put("text", msg.getContent());
+                contentArray.add(textBlock);
+            }
+            for (MessageToolCall call : msg.getToolCalls()) {
+                appendToolUseBlock(contentArray, call.getId(), call.getName(), call.getArgumentsJson());
+            }
+            msgNode.set("content", contentArray);
+            messagesArray.add(msgNode);
+            return true;
+        }
+        if (msg.getRole() == Message.Role.tool && msg.getToolResult() != null) {
+            ObjectNode msgNode = MAPPER.createObjectNode();
+            msgNode.put("role", "user");
+            ArrayNode contentArray = MAPPER.createArrayNode();
+            appendToolResultBlock(contentArray, msg.getToolResult().getToolCallId(), msg.getToolResult().getContent());
+            msgNode.set("content", contentArray);
+            messagesArray.add(msgNode);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isLegacyStructuredHistory(Message msg) {
+        return msg.getRole() != Message.Role.user
+                && msg.getContent() != null
+                && msg.getContent().stripLeading().startsWith("{");
+    }
+
+    private void appendThinkingBlock(ArrayNode contentArray, String think, String signature) {
+        if ((!isMiMoModel() || think == null || think.isEmpty()) && (signature == null || signature.isEmpty())) {
+            return;
+        }
+        ObjectNode thinkBlock = MAPPER.createObjectNode();
+        thinkBlock.put("type", "thinking");
+        if (think != null && !think.isEmpty()) {
+            thinkBlock.put("thinking", think);
+        }
+        if (signature != null && !signature.isEmpty()) {
+            thinkBlock.put("signature", signature);
+        }
+        contentArray.add(thinkBlock);
+    }
+
+    private void appendToolUseBlock(ArrayNode contentArray, String id, String name, String argumentsJson) {
+        ObjectNode toolBlock = MAPPER.createObjectNode();
+        toolBlock.put("type", "tool_use");
+        toolBlock.put("id", id);
+        toolBlock.put("name", name);
+        toolBlock.set("input", MAPPER.valueToTree(parseJsonSafe(argumentsJson)));
+        contentArray.add(toolBlock);
+    }
+
+    private void appendToolResultBlock(ArrayNode contentArray, String toolCallId, String content) {
+        ObjectNode resultBlock = MAPPER.createObjectNode();
+        resultBlock.put("type", "tool_result");
+        resultBlock.put("tool_use_id", toolCallId);
+        resultBlock.put("content", content);
+        contentArray.add(resultBlock);
     }
 
     private TokenUsage parseTokenUsage(JsonNode json) {
