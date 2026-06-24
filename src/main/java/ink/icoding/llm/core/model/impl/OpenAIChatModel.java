@@ -139,6 +139,7 @@ public class OpenAIChatModel implements LLMModel {
 
                 @Override
                 public void onEvent(EventSource eventSource, String id, String type, String data) {
+                    LLMRequestDebugLogger.logStreamEvent(requestDebugEnabled, id, type, data);
                     if ("[DONE]".equals(data)) return;
                     try {
                         JsonNode json = MAPPER.readTree(data);

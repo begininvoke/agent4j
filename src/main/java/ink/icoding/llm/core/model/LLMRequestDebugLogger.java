@@ -29,6 +29,20 @@ public final class LLMRequestDebugLogger {
         System.err.println(sb);
     }
 
+    public static void logStreamEvent(boolean enabled, String id, String type, String data) {
+        if (!enabled) {
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("[DEBUG] LLM Stream Event\n");
+        sb.append("ID: ").append(id == null ? "" : id).append("\n");
+        sb.append("Type: ").append(type == null ? "" : type).append("\n");
+        sb.append("Data:\n");
+        sb.append(data == null ? "" : data);
+        System.err.println(sb);
+    }
+
     private static String maskHeader(String name, String value) {
         if (value == null) {
             return "";

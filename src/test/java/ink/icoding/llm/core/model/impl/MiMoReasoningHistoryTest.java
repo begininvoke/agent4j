@@ -8,8 +8,12 @@ import okhttp3.internal.http2.ErrorCode;
 import okhttp3.internal.http2.StreamResetException;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -143,6 +147,48 @@ class MiMoReasoningHistoryTest {
     }
 
     @Test
+    void openAIResponseToolCallCanStartFromOutputItemAdded() throws Exception {
+        Class<?> entryClass = Class.forName("ink.icoding.llm.core.model.impl.OpenAIResponseModel$ToolCallEntry");
+        Method applyOutputItem = OpenAIResponseModel.class.getDeclaredMethod(
+                "applyOutputItemEvent", JsonNode.class, Map.class, entryClass);
+        Method applyDelta = OpenAIResponseModel.class.getDeclaredMethod(
+                "applyFunctionCallArgumentsDeltaEvent", JsonNode.class, Map.class, entryClass);
+        Method applyDone = OpenAIResponseModel.class.getDeclaredMethod(
+                "applyFunctionCallArgumentsDoneEvent", JsonNode.class, Map.class, entryClass, List.class);
+        Method applyCompleted = OpenAIResponseModel.class.getDeclaredMethod(
+                "applyCompletedResponseOutput", JsonNode.class, Map.class, List.class, entryClass);
+        applyOutputItem.setAccessible(true);
+        applyDelta.setAccessible(true);
+        applyDone.setAccessible(true);
+        applyCompleted.setAccessible(true);
+
+        Map<String, Object> entries = new LinkedHashMap<>();
+        List<Object> toolCalls = new ArrayList<>();
+        Object entry = applyOutputItem.invoke(null, MAPPER.readTree("""
+                {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"imgreader"},"output_index":0}
+                """), entries, null);
+        entry = applyDelta.invoke(null, MAPPER.readTree("""
+                {"type":"response.function_call_arguments.delta","delta":"{\\"images\\":[","item_id":"fc_1","output_index":0}
+                """), entries, entry);
+        entry = applyDelta.invoke(null, MAPPER.readTree("""
+                {"type":"response.function_call_arguments.delta","delta":"\\"a.png\\"]}","item_id":"fc_1","output_index":0}
+                """), entries, entry);
+        entry = applyDone.invoke(null, MAPPER.readTree("""
+                {"type":"response.function_call_arguments.done","arguments":"{\\"images\\":[\\"a.png\\"]}","item_id":"fc_1","output_index":0}
+                """), entries, entry, toolCalls);
+        applyCompleted.invoke(null, MAPPER.readTree("""
+                {"type":"response.completed","response":{"output":[{"id":"fc_1","type":"function_call","status":"completed","arguments":"{\\"images\\":[\\"a.png\\"]}","call_id":"call_1","name":"imgreader"}]}}
+                """), entries, toolCalls, entry);
+
+        assertEquals(1, toolCalls.size());
+        Object parsed = toolCalls.get(0);
+        assertEquals("fc_1", readField(parsed, "itemId"));
+        assertEquals("call_1", readField(parsed, "callId"));
+        assertEquals("imgreader", readField(parsed, "toolName"));
+        assertEquals("{\"images\":[\"a.png\"]}", readField(parsed, "argsJson"));
+    }
+
+    @Test
     void openAIResponseDropsLegacyChatToolMessages() throws Exception {
         OpenAIResponseModel model = new OpenAIResponseModel("https://example.com", "gpt-4.1", "test-key");
         Method method = OpenAIResponseModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
@@ -191,5 +237,11 @@ class MiMoReasoningHistoryTest {
                 List.of(assistant, tool), List.of());
         assertEquals("tool_use", anthropicBody.get("messages").get(0).get("content").get(1).get("type").asText());
         assertEquals("tool_result", anthropicBody.get("messages").get(1).get("content").get(0).get("type").asText());
+    }
+
+    private static Object readField(Object target, String name) throws Exception {
+        Field field = target.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(target);
     }
 }

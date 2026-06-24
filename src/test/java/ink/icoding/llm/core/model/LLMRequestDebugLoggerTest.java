@@ -46,4 +46,36 @@ class LLMRequestDebugLoggerTest {
         assertFalse(log.contains("Bearer sk-secret"));
         assertTrue(log.contains("{\"model\":\"test\"}"));
     }
+
+    @Test
+    void loggerPrintsRawStreamEventWhenEnabled() {
+        PrintStream originalErr = System.err;
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        System.setErr(new PrintStream(output));
+        try {
+            LLMRequestDebugLogger.logStreamEvent(true, "evt_1", "response.output_text.delta", "{\"delta\":\"hi\"}");
+        } finally {
+            System.setErr(originalErr);
+        }
+
+        String log = output.toString();
+        assertTrue(log.contains("[DEBUG] LLM Stream Event"));
+        assertTrue(log.contains("ID: evt_1"));
+        assertTrue(log.contains("Type: response.output_text.delta"));
+        assertTrue(log.contains("{\"delta\":\"hi\"}"));
+    }
+
+    @Test
+    void loggerSkipsStreamEventWhenDisabled() {
+        PrintStream originalErr = System.err;
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        System.setErr(new PrintStream(output));
+        try {
+            LLMRequestDebugLogger.logStreamEvent(false, "evt_1", "message_delta", "{\"delta\":{}}");
+        } finally {
+            System.setErr(originalErr);
+        }
+
+        assertTrue(output.toString().isEmpty());
+    }
 }

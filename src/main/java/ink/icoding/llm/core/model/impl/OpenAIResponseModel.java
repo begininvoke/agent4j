@@ -129,12 +129,11 @@ public class OpenAIResponseModel implements LLMModel {
 
             EventSource.Factory factory = EventSources.createFactory(client);
             factory.newEventSource(request, new EventSourceListener() {
-                private String currentCallId;
-                private String currentToolName;
-                private final StringBuilder toolArgsBuffer = new StringBuilder();
                 private final StringBuilder contentBuffer = new StringBuilder();
                 private final StringBuilder thinkBuffer = new StringBuilder();
+                private final Map<String, ToolCallEntry> toolCallEntries = new LinkedHashMap<>();
                 private final List<ToolCallEntry> toolCalls = new ArrayList<>();
+                private ToolCallEntry currentToolCall;
                 private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
                 private final AtomicBoolean turnHandled = new AtomicBoolean(false);
 
@@ -153,6 +152,7 @@ public class OpenAIResponseModel implements LLMModel {
 
                 @Override
                 public void onEvent(EventSource eventSource, String id, String type, String data) {
+                    LLMRequestDebugLogger.logStreamEvent(requestDebugEnabled, id, type, data);
                     try {
                         JsonNode json = MAPPER.readTree(data);
                         TokenUsage usage = parseTokenUsage(json);
@@ -174,23 +174,34 @@ public class OpenAIResponseModel implements LLMModel {
                                 ResultHandler handler = result.getHandler();
                                 if (handler != null) handler.onThink(json.get("delta").asText());
                             }
+                            case "response.output_item.added" -> {
+                                ToolCallEntry entry = applyOutputItemEvent(json, toolCallEntries, currentToolCall);
+                                if (entry != null) {
+                                    currentToolCall = entry;
+                                    notifyToolPreparing(result, entry);
+                                }
+                            }
                             case "response.function_call.start" -> {
-                                currentCallId = json.get("call_id").asText();
-                                currentToolName = json.get("name").asText();
-                                toolArgsBuffer.setLength(0);
-                                notifyToolPreparing(result, currentToolName, currentCallId);
+                                ToolCallEntry entry = applyFunctionCallStartEvent(json, toolCallEntries);
+                                currentToolCall = entry;
+                                notifyToolPreparing(result, entry);
                             }
                             case "response.function_call_arguments.delta" -> {
-                                toolArgsBuffer.append(json.get("delta").asText());
+                                currentToolCall = applyFunctionCallArgumentsDeltaEvent(json, toolCallEntries, currentToolCall);
                             }
                             case "response.function_call_arguments.done" -> {
-                                ToolCallEntry entry = new ToolCallEntry();
-                                entry.callId = currentCallId;
-                                entry.toolName = currentToolName;
-                                entry.argsJson = toolArgsBuffer.toString();
-                                toolCalls.add(entry);
+                                currentToolCall = applyFunctionCallArgumentsDoneEvent(json, toolCallEntries, currentToolCall, toolCalls);
+                            }
+                            case "response.output_item.done" -> {
+                                ToolCallEntry entry = applyOutputItemEvent(json, toolCallEntries, currentToolCall);
+                                if (entry != null) {
+                                    notifyToolPreparing(result, entry);
+                                    addToolCallOnce(toolCalls, entry);
+                                    currentToolCall = entry;
+                                }
                             }
                             case "response.completed" -> {
+                                applyCompletedResponseOutput(json, toolCallEntries, toolCalls, currentToolCall);
                                 cancelRequested.set(true);
                                 eventSource.cancel();
                                 finishCurrentTurn();
@@ -289,25 +300,196 @@ public class OpenAIResponseModel implements LLMModel {
      * 工具调用条目.
      */
     private static class ToolCallEntry {
+        String itemId;
         String callId;
         String toolName;
+        StringBuilder argsBuffer = new StringBuilder();
         String argsJson;
+        boolean preparingNotified;
+        boolean added;
     }
 
-    private void notifyToolPreparing(LLMResult result, String toolName, String callId) {
-        if (toolName == null || toolName.isEmpty()) {
+    private void notifyToolPreparing(LLMResult result, ToolCallEntry entry) {
+        if (entry == null || entry.preparingNotified || entry.toolName == null || entry.toolName.isEmpty()) {
             return;
         }
-        Tool tool = toolMap.get(toolName);
+        Tool tool = toolMap.get(entry.toolName);
         if (tool == null) {
             return;
         }
         ToolDescriptor descriptor = ToolDescriptor.fromTool(tool);
-        descriptor.setCallId(callId);
+        descriptor.setCallId(entry.callId);
         ResultHandler handler = result.getHandler();
         if (handler != null) {
+            entry.preparingNotified = true;
             handler.onTool(descriptor, ToolStatus.PREPARING);
         }
+    }
+
+    private static ToolCallEntry applyOutputItemEvent(JsonNode json,
+                                                       Map<String, ToolCallEntry> toolCallEntries,
+                                                       ToolCallEntry currentToolCall) {
+        JsonNode item = json == null ? null : json.get("item");
+        return applyFunctionCallItem(item, json, toolCallEntries, currentToolCall);
+    }
+
+    private static ToolCallEntry applyFunctionCallStartEvent(JsonNode json,
+                                                              Map<String, ToolCallEntry> toolCallEntries) {
+        ToolCallEntry entry = getOrCreateToolCallEntry(json, toolCallEntries, null);
+        if (entry == null) {
+            return null;
+        }
+        entry.callId = textValue(json.get("call_id"), entry.callId);
+        entry.toolName = textValue(json.get("name"), entry.toolName);
+        entry.argsBuffer.setLength(0);
+        entry.argsJson = null;
+        return entry;
+    }
+
+    private static ToolCallEntry findToolCallEntry(JsonNode json,
+                                                    Map<String, ToolCallEntry> toolCallEntries,
+                                                    ToolCallEntry currentToolCall) {
+        return getOrCreateToolCallEntry(json, toolCallEntries, currentToolCall);
+    }
+
+    private static ToolCallEntry applyFunctionCallArgumentsDeltaEvent(JsonNode json,
+                                                                       Map<String, ToolCallEntry> toolCallEntries,
+                                                                       ToolCallEntry currentToolCall) {
+        ToolCallEntry entry = findToolCallEntry(json, toolCallEntries, currentToolCall);
+        if (entry != null && json.has("delta") && !json.get("delta").isNull()) {
+            entry.argsBuffer.append(json.get("delta").asText());
+        }
+        return entry;
+    }
+
+    private static ToolCallEntry applyFunctionCallArgumentsDoneEvent(JsonNode json,
+                                                                      Map<String, ToolCallEntry> toolCallEntries,
+                                                                      ToolCallEntry currentToolCall,
+                                                                      List<ToolCallEntry> toolCalls) {
+        ToolCallEntry entry = findToolCallEntry(json, toolCallEntries, currentToolCall);
+        if (entry == null) {
+            return null;
+        }
+        if (json.has("arguments") && !json.get("arguments").isNull()) {
+            entry.argsJson = json.get("arguments").asText();
+        } else {
+            entry.argsJson = entry.argsBuffer.toString();
+        }
+        addToolCallOnce(toolCalls, entry);
+        return entry;
+    }
+
+    private static void applyCompletedResponseOutput(JsonNode json,
+                                                      Map<String, ToolCallEntry> toolCallEntries,
+                                                      List<ToolCallEntry> toolCalls,
+                                                      ToolCallEntry currentToolCall) {
+        JsonNode response = json == null ? null : json.get("response");
+        JsonNode output = response == null ? null : response.get("output");
+        if (output == null || !output.isArray()) {
+            return;
+        }
+        for (JsonNode item : output) {
+            ToolCallEntry entry = applyFunctionCallItem(item, json, toolCallEntries, currentToolCall);
+            if (entry != null) {
+                addToolCallOnce(toolCalls, entry);
+            }
+        }
+    }
+
+    private static ToolCallEntry applyFunctionCallItem(JsonNode item,
+                                                        JsonNode event,
+                                                        Map<String, ToolCallEntry> toolCallEntries,
+                                                        ToolCallEntry currentToolCall) {
+        if (item == null || item.isNull() || !"function_call".equals(textValue(item.get("type"), null))) {
+            return null;
+        }
+        ToolCallEntry entry = getOrCreateToolCallEntry(item, toolCallEntries, currentToolCall);
+        if (entry == null) {
+            return null;
+        }
+        entry.itemId = textValue(item.get("id"), entry.itemId);
+        entry.callId = textValue(item.get("call_id"), entry.callId);
+        entry.toolName = textValue(item.get("name"), entry.toolName);
+        if (item.has("arguments") && !item.get("arguments").isNull()) {
+            entry.argsJson = item.get("arguments").asText();
+            if (entry.argsJson != null && entry.argsBuffer.length() == 0) {
+                entry.argsBuffer.append(entry.argsJson);
+            }
+        }
+        rememberToolCallEntry(event, toolCallEntries, entry);
+        rememberToolCallEntry(item, toolCallEntries, entry);
+        return entry;
+    }
+
+    private static ToolCallEntry getOrCreateToolCallEntry(JsonNode json,
+                                                           Map<String, ToolCallEntry> toolCallEntries,
+                                                           ToolCallEntry currentToolCall) {
+        String key = toolCallKey(json);
+        if (key == null || key.isEmpty()) {
+            return currentToolCall;
+        }
+        return toolCallEntries.computeIfAbsent(key, ignored -> {
+            ToolCallEntry entry = new ToolCallEntry();
+            if (key.startsWith("item:")) {
+                entry.itemId = key.substring("item:".length());
+            } else if (key.startsWith("call:")) {
+                entry.callId = key.substring("call:".length());
+            }
+            return entry;
+        });
+    }
+
+    private static void rememberToolCallEntry(JsonNode json,
+                                               Map<String, ToolCallEntry> toolCallEntries,
+                                               ToolCallEntry entry) {
+        if (json == null || entry == null) {
+            return;
+        }
+        String key = toolCallKey(json);
+        if (key != null && !key.isEmpty()) {
+            toolCallEntries.put(key, entry);
+        }
+    }
+
+    private static String toolCallKey(JsonNode json) {
+        if (json == null) {
+            return null;
+        }
+        String itemId = textValue(json.get("item_id"), null);
+        if (itemId == null) {
+            itemId = textValue(json.get("id"), null);
+        }
+        if (itemId != null && !itemId.isEmpty()) {
+            return "item:" + itemId;
+        }
+        String callId = textValue(json.get("call_id"), null);
+        if (callId != null && !callId.isEmpty()) {
+            return "call:" + callId;
+        }
+        JsonNode outputIndex = json.get("output_index");
+        if (outputIndex != null && !outputIndex.isNull()) {
+            return "output:" + outputIndex.asText();
+        }
+        return null;
+    }
+
+    private static void addToolCallOnce(List<ToolCallEntry> toolCalls, ToolCallEntry entry) {
+        if (entry == null || entry.added) {
+            return;
+        }
+        if (entry.argsJson == null) {
+            entry.argsJson = entry.argsBuffer.toString();
+        }
+        entry.added = true;
+        toolCalls.add(entry);
+    }
+
+    private static String textValue(JsonNode node, String fallback) {
+        if (node == null || node.isNull()) {
+            return fallback;
+        }
+        String text = node.asText();
+        return text == null || text.isEmpty() ? fallback : text;
     }
 
     private ResultHandler suppressPreparing(ResultHandler handler) {
