@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class AgentClientSessionHistoryTest {
@@ -174,12 +175,14 @@ class AgentClientSessionHistoryTest {
 
         AgentClientSession session = agent.createSession()
                 .setContextSummaryTriggerTokens(0)
-                .setContextSummaryTriggerRounds(3);
+                .setContextSummaryTriggerRounds(3)
+                .disableThinking();
 
         AgentClientSession restored = AgentClientSession.fromSerialization(session.serialization(), agent);
 
         assertEquals(0, restored.getContextSummaryTriggerTokens());
         assertEquals(3, restored.getContextSummaryTriggerRounds());
+        assertEquals(false, restored.getThinkingEnabled());
     }
 
     @Test
@@ -195,6 +198,61 @@ class AgentClientSessionHistoryTest {
         agent.setLlmRequestDebugEnabled(false);
 
         assertEquals(false, model.isRequestDebugEnabled());
+    }
+
+    @Test
+    void agentClientPropagatesThinkingFlagToModel() {
+        UsageModel model = new UsageModel(10);
+        AgentClient agent = new AgentClient();
+
+        agent.disableThinking();
+        agent.setModel(model);
+
+        assertEquals(false, model.getThinkingEnabled());
+
+        agent.enableThinking();
+
+        assertEquals(true, model.getThinkingEnabled());
+
+        agent.setThinkingEnabled(null);
+
+        assertEquals(null, model.getThinkingEnabled());
+    }
+
+    @Test
+    void clearAllSkillsMakesAgentAPlainClientWithoutBuiltInTools() {
+        ToolCaptureModel model = new ToolCaptureModel();
+        AgentClient agent = new AgentClient();
+        agent.setModel(model);
+        agent.getSkills().add(new Skill("Test Skill", "A skill", List.of(), "skill content"));
+
+        agent.clearAllSkills();
+        agent.createSession().command("hello").execute();
+
+        assertEquals(0, agent.getTools().size());
+        assertEquals(0, agent.getSkills().size());
+        assertFalse(agent.isBuiltInAgentToolsEnabled());
+        assertEquals(0, model.toolCounts().get(0));
+    }
+
+    @Test
+    void sessionThinkingFlagOverridesOnlyDuringCurrentSessionRequest() {
+        ThinkingCaptureModel model = new ThinkingCaptureModel();
+        AgentClient agent = new AgentClient();
+        agent.setModel(model);
+        agent.enableThinking();
+
+        AgentClientSession session = agent.createSession()
+                .disableThinking()
+                .setContextSummaryTriggerRounds(1);
+        int setCountBeforeRequest = model.thinkingSetCount();
+
+        session.command("hello").execute();
+
+        assertEquals(List.of(false, false), model.capturedThinking());
+        assertEquals(true, agent.getThinkingEnabled());
+        assertEquals(true, model.getThinkingEnabled());
+        assertEquals(setCountBeforeRequest, model.thinkingSetCount());
     }
 
     private record TurnResponse(String content, String think) {}
@@ -292,6 +350,7 @@ class AgentClientSessionHistoryTest {
     private static class UsageModel implements LLMModel {
         private final int inputTokens;
         private boolean requestDebugEnabled;
+        private Boolean thinkingEnabled;
 
         private UsageModel(int inputTokens) {
             this.inputTokens = inputTokens;
@@ -329,6 +388,107 @@ class AgentClientSessionHistoryTest {
         @Override
         public boolean isRequestDebugEnabled() {
             return requestDebugEnabled;
+        }
+
+        @Override
+        public void setThinkingEnabled(Boolean enabled) {
+            this.thinkingEnabled = enabled;
+        }
+
+        @Override
+        public Boolean getThinkingEnabled() {
+            return thinkingEnabled;
+        }
+    }
+
+    private static class ToolCaptureModel implements LLMModel {
+        private final List<Integer> toolCounts = new ArrayList<>();
+
+        List<Integer> toolCounts() {
+            return toolCounts;
+        }
+
+        @Override
+        public LLMResult ask(Message message) {
+            return ask(List.of(message));
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages) {
+            return ask(messages, List.of());
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools) {
+            return ask(messages, tools, (toolName, paramJson, descriptor, handler) -> "ok");
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
+            toolCounts.add(tools.size());
+            return new LLMResult(result -> {
+                result.addAppendedMessage(Message.fromAssistant("ok"));
+                result.complete("ok");
+            });
+        }
+    }
+
+    private static class ThinkingCaptureModel implements LLMModel {
+        private final List<Boolean> capturedThinking = new ArrayList<>();
+        private Boolean thinkingEnabled;
+        private int thinkingSetCount;
+
+        List<Boolean> capturedThinking() {
+            return capturedThinking;
+        }
+
+        int thinkingSetCount() {
+            return thinkingSetCount;
+        }
+
+        @Override
+        public LLMResult ask(Message message) {
+            return ask(List.of(message));
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages) {
+            return ask(messages, List.of());
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools) {
+            return ask(messages, tools, (toolName, paramJson, descriptor, handler) -> "ok");
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
+            capturedThinking.add(thinkingEnabled);
+            return new LLMResult(result -> {
+                result.addAppendedMessage(Message.fromAssistant("ok"));
+                result.complete("ok");
+            });
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
+                             Boolean requestThinkingEnabled) {
+            capturedThinking.add(requestThinkingEnabled);
+            return new LLMResult(result -> {
+                result.addAppendedMessage(Message.fromAssistant("ok"));
+                result.complete("ok");
+            });
+        }
+
+        @Override
+        public void setThinkingEnabled(Boolean enabled) {
+            this.thinkingEnabled = enabled;
+            thinkingSetCount++;
+        }
+
+        @Override
+        public Boolean getThinkingEnabled() {
+            return thinkingEnabled;
         }
     }
 

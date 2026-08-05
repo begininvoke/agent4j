@@ -31,6 +31,8 @@ public class AgentClient {
     private List<Tool> tools = new ArrayList<>();
     private List<Skill> skills = new ArrayList<>();
     private boolean llmRequestDebugEnabled;
+    private Boolean thinkingEnabled;
+    private boolean builtInAgentToolsEnabled = true;
 
     /**
      * 创建新的会话.
@@ -56,6 +58,7 @@ public class AgentClient {
         this.model = model;
         if (this.model != null) {
             this.model.setRequestDebugEnabled(llmRequestDebugEnabled);
+            this.model.setThinkingEnabled(thinkingEnabled);
         }
     }
     public String getName() { return name; }
@@ -63,9 +66,19 @@ public class AgentClient {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
     public List<Tool> getTools() { return tools; }
-    public void setTools(List<Tool> tools) { this.tools = tools; }
+    public void setTools(List<Tool> tools) { this.tools = tools == null ? new ArrayList<>() : tools; }
     public List<Skill> getSkills() { return skills; }
-    public void setSkills(List<Skill> skills) { this.skills = skills; }
+    public void setSkills(List<Skill> skills) { this.skills = skills == null ? new ArrayList<>() : skills; }
+    public boolean isBuiltInAgentToolsEnabled() { return builtInAgentToolsEnabled; }
+    public void setBuiltInAgentToolsEnabled(boolean builtInAgentToolsEnabled) {
+        this.builtInAgentToolsEnabled = builtInAgentToolsEnabled;
+    }
+    public AgentClient clearAllSkills() {
+        tools.clear();
+        skills.clear();
+        builtInAgentToolsEnabled = false;
+        return this;
+    }
     public boolean isLlmRequestDebugEnabled() { return llmRequestDebugEnabled; }
     public void setLlmRequestDebugEnabled(boolean llmRequestDebugEnabled) {
         this.llmRequestDebugEnabled = llmRequestDebugEnabled;
@@ -73,4 +86,13 @@ public class AgentClient {
             this.model.setRequestDebugEnabled(llmRequestDebugEnabled);
         }
     }
+    public Boolean getThinkingEnabled() { return thinkingEnabled; }
+    public void setThinkingEnabled(Boolean thinkingEnabled) {
+        this.thinkingEnabled = thinkingEnabled;
+        if (this.model != null) {
+            this.model.setThinkingEnabled(thinkingEnabled);
+        }
+    }
+    public void enableThinking() { setThinkingEnabled(true); }
+    public void disableThinking() { setThinkingEnabled(false); }
 }

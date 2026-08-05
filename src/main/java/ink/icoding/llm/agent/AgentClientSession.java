@@ -56,6 +56,7 @@ public class AgentClientSession {
     private int lastContextTokens;
     private int contextSummaryTriggerTokens = DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS;
     private int contextSummaryTriggerRounds;
+    private Boolean thinkingEnabled;
 
     /**
      * 构造会话实例.
@@ -105,9 +106,8 @@ public class AgentClientSession {
 
         ToolExecutor toolExecutor = createToolExecutor(result);
         Message assistantMessage = Message.fromAssistant();
-
         try {
-            LLMResult llmResult = agent.getModel().ask(messages, allTools, toolExecutor);
+            LLMResult llmResult = askModel(messages, allTools, toolExecutor);
 
             // 先设handler, 再execute, 确保错误不会丢失
             llmResult.then(new ResultHandler() {
@@ -187,6 +187,23 @@ public class AgentClientSession {
         }
     }
 
+    private LLMResult askModel(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
+        if (thinkingEnabled == null) {
+            return agent.getModel().ask(messages, tools, toolExecutor);
+        }
+        return agent.getModel().ask(messages, tools, toolExecutor, thinkingEnabled);
+    }
+
+    private LLMResult askModel(List<Message> messages, List<Tool> tools) {
+        if (thinkingEnabled == null) {
+            return agent.getModel().ask(messages, tools);
+        }
+        ToolExecutor noToolExecutor = (toolName, paramJson, descriptor, handler) -> {
+            throw new IllegalStateException("No tools are available for this LLM call");
+        };
+        return agent.getModel().ask(messages, tools, noToolExecutor, thinkingEnabled);
+    }
+
     /**
      * 创建工具执行器, 拦截计划和子Agent工具的执行.
      *
@@ -253,7 +270,7 @@ public class AgentClientSession {
                     return ToolExecutor.defaultExecute(tool, pj, desc, h);
                 };
 
-                LLMResult stepResult = agent.getModel().ask(stepMessages, allTools, stepToolExecutor);
+                LLMResult stepResult = askModel(stepMessages, allTools, stepToolExecutor);
                 stepResult.then(new ResultHandler() {
                     @Override
                     public void onMessage(String msg) {
@@ -344,6 +361,8 @@ public class AgentClientSession {
         if (subAgent == null || task == null) return toolResult;
 
         // 子Agent继承父Agent的模型、工具和技能
+        subAgent.setLlmRequestDebugEnabled(agent.isLlmRequestDebugEnabled());
+        subAgent.setThinkingEnabled(agent.getThinkingEnabled());
         subAgent.setModel(agent.getModel());
         subAgent.getTools().addAll(agent.getTools());
         subAgent.getSkills().addAll(agent.getSkills());
@@ -357,6 +376,7 @@ public class AgentClientSession {
 
         try {
             AgentClientSession subSession = subAgent.createSession();
+            subSession.setThinkingEnabled(thinkingEnabled);
             AgentSessionResult subResult = subSession.command(task);
             subResult.then(new AgentResultHandler() {
                 @Override
@@ -528,7 +548,7 @@ public class AgentClientSession {
                 + MEMORY_SUMMARY_MAX_TOKENS + " tokens."));
 
         try {
-            LLMResult summaryResult = agent.getModel().ask(summaryMessages, List.of());
+            LLMResult summaryResult = askModel(summaryMessages, List.of());
             summaryResult.execute();
             String summary = summaryResult.get();
             if ((summary == null || summary.isBlank()) && !summaryResult.getAppendedMessages().isEmpty()) {
@@ -647,10 +667,15 @@ public class AgentClientSession {
      * @return 工具列表
      */
     private List<Tool> getAllTools() {
+        if (!agent.isBuiltInAgentToolsEnabled() && agent.getTools().isEmpty() && agent.getSkills().isEmpty()) {
+            return List.of();
+        }
         List<Tool> allTools = new ArrayList<>(agent.getTools());
         // 添加session级别的计划/子Agent工具(使用session持有的实例)
-        allTools.add(createPlanTool);
-        allTools.add(createSubAgentTool);
+        if (agent.isBuiltInAgentToolsEnabled()) {
+            allTools.add(createPlanTool);
+            allTools.add(createSubAgentTool);
+        }
         // 添加技能中的工具, 跳过已存在的同名工具
         java.util.Set<String> names = new java.util.HashSet<>();
         for (Tool<?> t : allTools) {
@@ -681,6 +706,7 @@ public class AgentClientSession {
             data.setLastContextTokens(lastContextTokens);
             data.setContextSummaryTriggerTokens(contextSummaryTriggerTokens);
             data.setContextSummaryTriggerRounds(contextSummaryTriggerRounds);
+            data.setThinkingEnabled(thinkingEnabled);
             data.setSubAgents(subAgents.stream()
                     .map(AgentClient::getName)
                     .collect(Collectors.toList()));
@@ -709,6 +735,7 @@ public class AgentClientSession {
             session.lastContextTokens = data.getLastContextTokens();
             session.contextSummaryTriggerTokens = data.getContextSummaryTriggerTokens();
             session.contextSummaryTriggerRounds = data.getContextSummaryTriggerRounds();
+            session.thinkingEnabled = data.getThinkingEnabled();
             return session;
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to deserialize session", e);
@@ -748,6 +775,21 @@ public class AgentClientSession {
         return this;
     }
 
+    /** 获取当前Session级思考开关; null表示使用Agent/底层模型默认设置 */
+    public Boolean getThinkingEnabled() { return thinkingEnabled; }
+
+    /** 设置当前Session级思考开关; null表示使用Agent/底层模型默认设置 */
+    public AgentClientSession setThinkingEnabled(Boolean thinkingEnabled) {
+        this.thinkingEnabled = thinkingEnabled;
+        return this;
+    }
+
+    /** 仅对当前Session开启思考 */
+    public AgentClientSession enableThinking() { return setThinkingEnabled(true); }
+
+    /** 仅对当前Session关闭思考 */
+    public AgentClientSession disableThinking() { return setThinkingEnabled(false); }
+
     /**
      * 序列化数据内部类.
      */
@@ -759,6 +801,7 @@ public class AgentClientSession {
         private int lastContextTokens;
         private int contextSummaryTriggerTokens = DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS;
         private int contextSummaryTriggerRounds;
+        private Boolean thinkingEnabled;
 
         public List<Message> getHistory() { return history; }
         public void setHistory(List<Message> history) { this.history = history; }
@@ -774,5 +817,7 @@ public class AgentClientSession {
         public void setContextSummaryTriggerTokens(int contextSummaryTriggerTokens) { this.contextSummaryTriggerTokens = contextSummaryTriggerTokens; }
         public int getContextSummaryTriggerRounds() { return contextSummaryTriggerRounds; }
         public void setContextSummaryTriggerRounds(int contextSummaryTriggerRounds) { this.contextSummaryTriggerRounds = contextSummaryTriggerRounds; }
+        public Boolean getThinkingEnabled() { return thinkingEnabled; }
+        public void setThinkingEnabled(Boolean thinkingEnabled) { this.thinkingEnabled = thinkingEnabled; }
     }
 }

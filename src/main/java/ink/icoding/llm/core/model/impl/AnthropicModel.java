@@ -43,6 +43,7 @@ public class AnthropicModel implements LLMModel {
     private final OkHttpClient client;
     private final Map<String, Tool> toolMap = new ConcurrentHashMap<>();
     private boolean requestDebugEnabled;
+    private Boolean thinkingEnabled;
 
     /**
      * 构造Anthropic模型实例.
@@ -56,10 +57,16 @@ public class AnthropicModel implements LLMModel {
     }
 
     public AnthropicModel(String baseUrl, String modelName, String apiKey, boolean requestDebugEnabled) {
+        this(baseUrl, modelName, apiKey, requestDebugEnabled, null);
+    }
+
+    public AnthropicModel(String baseUrl, String modelName, String apiKey,
+                          boolean requestDebugEnabled, Boolean thinkingEnabled) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.modelName = modelName;
         this.apiKey = apiKey;
         this.requestDebugEnabled = requestDebugEnabled;
+        this.thinkingEnabled = thinkingEnabled;
         this.client = new OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
@@ -75,6 +82,16 @@ public class AnthropicModel implements LLMModel {
     @Override
     public boolean isRequestDebugEnabled() {
         return requestDebugEnabled;
+    }
+
+    @Override
+    public void setThinkingEnabled(Boolean enabled) {
+        this.thinkingEnabled = enabled;
+    }
+
+    @Override
+    public Boolean getThinkingEnabled() {
+        return thinkingEnabled;
     }
 
     /** {@inheritDoc} */
@@ -102,6 +119,13 @@ public class AnthropicModel implements LLMModel {
     /** {@inheritDoc} */
     @Override
     public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
+        return ask(messages, tools, toolExecutor, thinkingEnabled);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
+                         Boolean requestThinkingEnabled) {
         List<ToolDescriptor> descriptors = new ArrayList<>();
         for (Tool tool : tools) {
             ToolDescriptor desc = ToolDescriptor.fromTool(tool);
@@ -109,16 +133,18 @@ public class AnthropicModel implements LLMModel {
             toolMap.put(desc.getName(), tool);
         }
 
-        return new LLMResult(r -> executeAgentLoop(r, new ArrayList<>(messages), descriptors, toolExecutor));
+        return new LLMResult(r -> executeAgentLoop(r, new ArrayList<>(messages), descriptors,
+                toolExecutor, requestThinkingEnabled));
     }
 
     /**
      * 执行Agent循环: LLM -> 工具调用 -> 反馈结果 -> LLM, 直到返回文本响应.
      */
     private void executeAgentLoop(LLMResult result, List<Message> messages,
-                                   List<ToolDescriptor> tools, ToolExecutor toolExecutor) {
+                                   List<ToolDescriptor> tools, ToolExecutor toolExecutor,
+                                   Boolean requestThinkingEnabled) {
         try {
-            ObjectNode body = buildRequestBody(messages, tools);
+            ObjectNode body = buildRequestBody(messages, tools, requestThinkingEnabled);
             Request request = new Request.Builder()
                     .url(baseUrl + "/v1/messages")
                     .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
@@ -146,7 +172,7 @@ public class AnthropicModel implements LLMModel {
                         return;
                     }
                     if (shouldContinueWithToolCalls(stopReason, toolCalls)) {
-                        handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                        handleToolCallsAndContinue(result, messages, tools, toolExecutor, requestThinkingEnabled,
                                 contentBuffer.toString(), thinkBuffer.toString(),
                                 thinkSignatureBuffer.toString(), new ArrayList<>(toolCalls));
                     } else {
@@ -274,6 +300,7 @@ public class AnthropicModel implements LLMModel {
      */
     private void handleToolCallsAndContinue(LLMResult result, List<Message> messages,
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
+                                             Boolean requestThinkingEnabled,
                                              String content, String think, String thinkSignature,
                                              List<ToolCallEntry> toolCalls) {
         try {
@@ -318,7 +345,7 @@ public class AnthropicModel implements LLMModel {
             }
 
             // 继续Agent循环
-            executeAgentLoop(result, messages, tools, toolExecutor);
+            executeAgentLoop(result, messages, tools, toolExecutor, requestThinkingEnabled);
         } catch (Exception e) {
             handleError(result, e);
         }
@@ -463,6 +490,11 @@ public class AnthropicModel implements LLMModel {
      * 构建Anthropic Messages请求体.
      */
     private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools) {
+        return buildRequestBody(messages, tools, thinkingEnabled);
+    }
+
+    private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools,
+                                        Boolean requestThinkingEnabled) {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", modelName);
         body.put("max_tokens", 4096);
@@ -521,8 +553,19 @@ public class AnthropicModel implements LLMModel {
             }
             body.set("tools", toolsArray);
         }
+        applyThinkingOptions(body, requestThinkingEnabled);
 
         return body;
+    }
+
+    private void applyThinkingOptions(ObjectNode body, Boolean requestThinkingEnabled) {
+        if (!Boolean.TRUE.equals(requestThinkingEnabled)) {
+            return;
+        }
+        ObjectNode thinking = MAPPER.createObjectNode();
+        thinking.put("type", "enabled");
+        thinking.put("budget_tokens", 1024);
+        body.set("thinking", thinking);
     }
 
     private boolean appendNeutralMessage(ArrayNode messagesArray, Message msg) {

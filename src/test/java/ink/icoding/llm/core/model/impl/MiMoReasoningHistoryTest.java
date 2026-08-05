@@ -147,6 +147,87 @@ class MiMoReasoningHistoryTest {
     }
 
     @Test
+    void qwenChatRequestIncludesThinkingSwitchWhenExplicitlySet() throws Exception {
+        OpenAIChatModel model = new OpenAIChatModel("https://example.com", "Qwen3-235B-A22B", "test-key");
+        model.setThinkingEnabled(false);
+        Method method = OpenAIChatModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        method.setAccessible(true);
+
+        ObjectNode body = (ObjectNode) method.invoke(model, List.of(Message.fromUser("hi")), List.of());
+
+        assertFalse(body.get("chat_template_kwargs").get("enable_thinking").asBoolean());
+    }
+
+    @Test
+    void nonQwenChatRequestDoesNotIncludeThinkingSwitch() throws Exception {
+        OpenAIChatModel model = new OpenAIChatModel("https://example.com", "gpt-4.1", "test-key");
+        model.setThinkingEnabled(false);
+        Method method = OpenAIChatModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        method.setAccessible(true);
+
+        ObjectNode body = (ObjectNode) method.invoke(model, List.of(Message.fromUser("hi")), List.of());
+
+        assertFalse(body.has("chat_template_kwargs"));
+    }
+
+    @Test
+    void responseRequestMapsThinkingSwitchToReasoningEffort() throws Exception {
+        OpenAIResponseModel model = new OpenAIResponseModel("https://example.com", "gpt-5-mini", "test-key");
+        model.setThinkingEnabled(false);
+        Method method = OpenAIResponseModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        method.setAccessible(true);
+
+        ObjectNode body = (ObjectNode) method.invoke(model, List.of(Message.fromUser("hi")), List.of());
+
+        assertEquals("none", body.get("reasoning").get("effort").asText());
+    }
+
+    @Test
+    void anthropicRequestIncludesThinkingBudgetWhenEnabled() throws Exception {
+        AnthropicModel model = new AnthropicModel("https://example.com", "claude-sonnet-4", "test-key");
+        model.setThinkingEnabled(true);
+        Method method = AnthropicModel.class.getDeclaredMethod("buildRequestBody", List.class, List.class);
+        method.setAccessible(true);
+
+        ObjectNode body = (ObjectNode) method.invoke(model, List.of(Message.fromUser("hi")), List.of());
+
+        assertEquals("enabled", body.get("thinking").get("type").asText());
+        assertEquals(1024, body.get("thinking").get("budget_tokens").asInt());
+    }
+
+    @Test
+    void requestThinkingArgumentOverridesModelSettingForAllProtocols() throws Exception {
+        OpenAIChatModel chatModel = new OpenAIChatModel("https://example.com", "Qwen3", "test-key");
+        chatModel.setThinkingEnabled(true);
+        Method chatMethod = OpenAIChatModel.class.getDeclaredMethod(
+                "buildRequestBody", List.class, List.class, Boolean.class);
+        chatMethod.setAccessible(true);
+        ObjectNode chatBody = (ObjectNode) chatMethod.invoke(
+                chatModel, List.of(Message.fromUser("hi")), List.of(), false);
+        assertFalse(chatBody.get("chat_template_kwargs").get("enable_thinking").asBoolean());
+
+        OpenAIResponseModel responseModel = new OpenAIResponseModel(
+                "https://example.com", "gpt-5-mini", "test-key");
+        responseModel.setThinkingEnabled(true);
+        Method responseMethod = OpenAIResponseModel.class.getDeclaredMethod(
+                "buildRequestBody", List.class, List.class, Boolean.class);
+        responseMethod.setAccessible(true);
+        ObjectNode responseBody = (ObjectNode) responseMethod.invoke(
+                responseModel, List.of(Message.fromUser("hi")), List.of(), false);
+        assertEquals("none", responseBody.get("reasoning").get("effort").asText());
+
+        AnthropicModel anthropicModel = new AnthropicModel(
+                "https://example.com", "claude-sonnet-4", "test-key");
+        anthropicModel.setThinkingEnabled(true);
+        Method anthropicMethod = AnthropicModel.class.getDeclaredMethod(
+                "buildRequestBody", List.class, List.class, Boolean.class);
+        anthropicMethod.setAccessible(true);
+        ObjectNode anthropicBody = (ObjectNode) anthropicMethod.invoke(
+                anthropicModel, List.of(Message.fromUser("hi")), List.of(), false);
+        assertFalse(anthropicBody.has("thinking"));
+    }
+
+    @Test
     void openAIResponseToolCallCanStartFromOutputItemAdded() throws Exception {
         Class<?> entryClass = Class.forName("ink.icoding.llm.core.model.impl.OpenAIResponseModel$ToolCallEntry");
         Method applyOutputItem = OpenAIResponseModel.class.getDeclaredMethod(

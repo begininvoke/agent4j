@@ -43,6 +43,7 @@ public class OpenAIChatModel implements LLMModel {
     private final OkHttpClient client;
     private final Map<String, Tool> toolMap = new ConcurrentHashMap<>();
     private boolean requestDebugEnabled;
+    private Boolean thinkingEnabled;
 
     /**
      * 构造OpenAI Chat模型实例.
@@ -56,10 +57,16 @@ public class OpenAIChatModel implements LLMModel {
     }
 
     public OpenAIChatModel(String baseUrl, String modelName, String apiKey, boolean requestDebugEnabled) {
+        this(baseUrl, modelName, apiKey, requestDebugEnabled, null);
+    }
+
+    public OpenAIChatModel(String baseUrl, String modelName, String apiKey,
+                           boolean requestDebugEnabled, Boolean thinkingEnabled) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.modelName = modelName;
         this.apiKey = apiKey;
         this.requestDebugEnabled = requestDebugEnabled;
+        this.thinkingEnabled = thinkingEnabled;
         this.client = new OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
@@ -75,6 +82,16 @@ public class OpenAIChatModel implements LLMModel {
     @Override
     public boolean isRequestDebugEnabled() {
         return requestDebugEnabled;
+    }
+
+    @Override
+    public void setThinkingEnabled(Boolean enabled) {
+        this.thinkingEnabled = enabled;
+    }
+
+    @Override
+    public Boolean getThinkingEnabled() {
+        return thinkingEnabled;
     }
 
     /** {@inheritDoc} */
@@ -102,6 +119,13 @@ public class OpenAIChatModel implements LLMModel {
     /** {@inheritDoc} */
     @Override
     public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
+        return ask(messages, tools, toolExecutor, thinkingEnabled);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
+                         Boolean requestThinkingEnabled) {
         List<ToolDescriptor> descriptors = new ArrayList<>();
         for (Tool tool : tools) {
             ToolDescriptor desc = ToolDescriptor.fromTool(tool);
@@ -109,7 +133,8 @@ public class OpenAIChatModel implements LLMModel {
             toolMap.put(desc.getName(), tool);
         }
 
-        return new LLMResult(r -> executeAgentLoop(r, new ArrayList<>(messages), descriptors, toolExecutor));
+        return new LLMResult(r -> executeAgentLoop(r, new ArrayList<>(messages), descriptors,
+                toolExecutor, requestThinkingEnabled));
     }
 
     /**
@@ -120,9 +145,10 @@ public class OpenAIChatModel implements LLMModel {
      * @param tools        工具描述列表
      * @param toolExecutor 工具执行器
      */
-    private void executeAgentLoop(LLMResult result, List<Message> messages, List<ToolDescriptor> tools, ToolExecutor toolExecutor) {
+    private void executeAgentLoop(LLMResult result, List<Message> messages, List<ToolDescriptor> tools,
+                                  ToolExecutor toolExecutor, Boolean requestThinkingEnabled) {
         try {
-            ObjectNode body = buildRequestBody(messages, tools);
+            ObjectNode body = buildRequestBody(messages, tools, requestThinkingEnabled);
             Request request = new Request.Builder()
                     .url(baseUrl + "/v1/chat/completions")
                     .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
@@ -227,7 +253,7 @@ public class OpenAIChatModel implements LLMModel {
                             String reason = finishReason.asText();
                             if ("tool_calls".equals(reason)) {
                                 eventSource.cancel();
-                                handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                        handleToolCallsAndContinue(result, messages, tools, toolExecutor, requestThinkingEnabled,
                                         contentBuffer.toString(), thinkBuffer.toString(), toolCalls);
                             } else if ("stop".equals(reason)) {
                                 eventSource.cancel();
@@ -277,6 +303,7 @@ public class OpenAIChatModel implements LLMModel {
      */
     private void handleToolCallsAndContinue(LLMResult result, List<Message> messages,
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
+                                             Boolean requestThinkingEnabled,
                                              String content, String think, List<ToolCallEntry> toolCalls) {
         try {
             // 添加协议无关的assistant消息(含工具调用)
@@ -314,7 +341,7 @@ public class OpenAIChatModel implements LLMModel {
             }
 
             // 继续Agent循环
-            executeAgentLoop(result, messages, tools, toolExecutor);
+            executeAgentLoop(result, messages, tools, toolExecutor, requestThinkingEnabled);
         } catch (Exception e) {
             handleError(result, e);
         }
@@ -404,6 +431,11 @@ public class OpenAIChatModel implements LLMModel {
      * @return 请求体JSON节点
      */
     private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools) {
+        return buildRequestBody(messages, tools, thinkingEnabled);
+    }
+
+    private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools,
+                                        Boolean requestThinkingEnabled) {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", modelName);
         body.put("stream", true);
@@ -458,8 +490,18 @@ public class OpenAIChatModel implements LLMModel {
             }
             body.set("tools", toolsArray);
         }
+        applyThinkingOptions(body, requestThinkingEnabled);
 
         return body;
+    }
+
+    private void applyThinkingOptions(ObjectNode body, Boolean requestThinkingEnabled) {
+        if (requestThinkingEnabled == null || !isQwenModel()) {
+            return;
+        }
+        ObjectNode chatTemplateKwargs = MAPPER.createObjectNode();
+        chatTemplateKwargs.put("enable_thinking", requestThinkingEnabled);
+        body.set("chat_template_kwargs", chatTemplateKwargs);
     }
 
     private boolean appendNeutralMessage(ArrayNode messagesArray, Message msg) {
@@ -565,5 +607,13 @@ public class OpenAIChatModel implements LLMModel {
 
     private boolean isMiMoModel() {
         return modelName != null && modelName.regionMatches(true, 0, "MiMo", 0, 4);
+    }
+
+    private boolean isQwenModel() {
+        if (modelName == null) {
+            return false;
+        }
+        String lower = modelName.toLowerCase(Locale.ROOT);
+        return lower.contains("qwen") || lower.contains("qwq");
     }
 }
