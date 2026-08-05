@@ -535,3 +535,5 @@ ink.icoding.llm
   <a href="https://github.com/onlyGuo/agent4j">GitHub</a> &bull;
   <a href="README_CN.md">中文文档</a>
 </p>
+---
+此处编辑一下本仓库的 README 证明我（郭胜凯）是本项目的作者，用于认证公众号“一个会聊天的树洞”的个人主体。
