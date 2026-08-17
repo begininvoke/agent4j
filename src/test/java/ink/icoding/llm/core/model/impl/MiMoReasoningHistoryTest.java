@@ -228,6 +228,38 @@ class MiMoReasoningHistoryTest {
     }
 
     @Test
+    void requestTemperatureArgumentOverridesModelSettingForAllProtocols() throws Exception {
+        OpenAIChatModel chatModel = new OpenAIChatModel("https://example.com", "Qwen3", "test-key");
+        chatModel.setTemperature(0.9);
+        Method chatMethod = OpenAIChatModel.class.getDeclaredMethod(
+                "buildRequestBody", List.class, List.class, Boolean.class, Double.class);
+        chatMethod.setAccessible(true);
+        ObjectNode chatBody = (ObjectNode) chatMethod.invoke(
+                chatModel, List.of(Message.fromUser("hi")), List.of(), null, 0.2);
+        assertEquals(0.2, chatBody.get("temperature").asDouble());
+
+        OpenAIResponseModel responseModel = new OpenAIResponseModel(
+                "https://example.com", "gpt-5-mini", "test-key");
+        responseModel.setTemperature(0.9);
+        Method responseMethod = OpenAIResponseModel.class.getDeclaredMethod(
+                "buildRequestBody", List.class, List.class, Boolean.class, Double.class);
+        responseMethod.setAccessible(true);
+        ObjectNode responseBody = (ObjectNode) responseMethod.invoke(
+                responseModel, List.of(Message.fromUser("hi")), List.of(), null, 0.3);
+        assertEquals(0.3, responseBody.get("temperature").asDouble());
+
+        AnthropicModel anthropicModel = new AnthropicModel(
+                "https://example.com", "claude-sonnet-4", "test-key");
+        anthropicModel.setTemperature(0.9);
+        Method anthropicMethod = AnthropicModel.class.getDeclaredMethod(
+                "buildRequestBody", List.class, List.class, Boolean.class, Double.class);
+        anthropicMethod.setAccessible(true);
+        ObjectNode anthropicBody = (ObjectNode) anthropicMethod.invoke(
+                anthropicModel, List.of(Message.fromUser("hi")), List.of(), null, 0.4);
+        assertEquals(0.4, anthropicBody.get("temperature").asDouble());
+    }
+
+    @Test
     void openAIResponseToolCallCanStartFromOutputItemAdded() throws Exception {
         Class<?> entryClass = Class.forName("ink.icoding.llm.core.model.impl.OpenAIResponseModel$ToolCallEntry");
         Method applyOutputItem = OpenAIResponseModel.class.getDeclaredMethod(

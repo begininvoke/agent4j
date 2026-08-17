@@ -32,6 +32,7 @@ public class AgentClient {
     private List<Skill> skills = new ArrayList<>();
     private boolean llmRequestDebugEnabled;
     private Boolean thinkingEnabled;
+    private Double temperature;
     private boolean builtInAgentToolsEnabled = true;
 
     /**
@@ -59,6 +60,7 @@ public class AgentClient {
         if (this.model != null) {
             this.model.setRequestDebugEnabled(llmRequestDebugEnabled);
             this.model.setThinkingEnabled(thinkingEnabled);
+            this.model.setTemperature(temperature);
         }
     }
     public String getName() { return name; }
@@ -95,4 +97,11 @@ public class AgentClient {
     }
     public void enableThinking() { setThinkingEnabled(true); }
     public void disableThinking() { setThinkingEnabled(false); }
+    public Double getTemperature() { return temperature; }
+    public void setTemperature(Double temperature) {
+        this.temperature = temperature;
+        if (this.model != null) {
+            this.model.setTemperature(temperature);
+        }
+    }
 }

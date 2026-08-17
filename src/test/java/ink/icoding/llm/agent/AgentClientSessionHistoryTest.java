@@ -176,13 +176,15 @@ class AgentClientSessionHistoryTest {
         AgentClientSession session = agent.createSession()
                 .setContextSummaryTriggerTokens(0)
                 .setContextSummaryTriggerRounds(3)
-                .disableThinking();
+                .disableThinking()
+                .setTemperature(0.35);
 
         AgentClientSession restored = AgentClientSession.fromSerialization(session.serialization(), agent);
 
         assertEquals(0, restored.getContextSummaryTriggerTokens());
         assertEquals(3, restored.getContextSummaryTriggerRounds());
         assertEquals(false, restored.getThinkingEnabled());
+        assertEquals(0.35, restored.getTemperature());
     }
 
     @Test
@@ -236,23 +238,30 @@ class AgentClientSessionHistoryTest {
     }
 
     @Test
-    void sessionThinkingFlagOverridesOnlyDuringCurrentSessionRequest() {
+    void sessionRequestOptionsOverrideWithoutMutatingSharedModel() {
         ThinkingCaptureModel model = new ThinkingCaptureModel();
         AgentClient agent = new AgentClient();
         agent.setModel(model);
         agent.enableThinking();
+        agent.setTemperature(0.8);
 
         AgentClientSession session = agent.createSession()
                 .disableThinking()
+                .setTemperature(0.2)
                 .setContextSummaryTriggerRounds(1);
         int setCountBeforeRequest = model.thinkingSetCount();
+        int temperatureSetCountBeforeRequest = model.temperatureSetCount();
 
         session.command("hello").execute();
 
         assertEquals(List.of(false, false), model.capturedThinking());
+        assertEquals(List.of(0.2, 0.2), model.capturedTemperatures());
         assertEquals(true, agent.getThinkingEnabled());
         assertEquals(true, model.getThinkingEnabled());
+        assertEquals(0.8, agent.getTemperature());
+        assertEquals(0.8, model.getTemperature());
         assertEquals(setCountBeforeRequest, model.thinkingSetCount());
+        assertEquals(temperatureSetCountBeforeRequest, model.temperatureSetCount());
     }
 
     private record TurnResponse(String content, String think) {}
@@ -435,8 +444,11 @@ class AgentClientSessionHistoryTest {
 
     private static class ThinkingCaptureModel implements LLMModel {
         private final List<Boolean> capturedThinking = new ArrayList<>();
+        private final List<Double> capturedTemperatures = new ArrayList<>();
         private Boolean thinkingEnabled;
+        private Double temperature;
         private int thinkingSetCount;
+        private int temperatureSetCount;
 
         List<Boolean> capturedThinking() {
             return capturedThinking;
@@ -444,6 +456,14 @@ class AgentClientSessionHistoryTest {
 
         int thinkingSetCount() {
             return thinkingSetCount;
+        }
+
+        List<Double> capturedTemperatures() {
+            return capturedTemperatures;
+        }
+
+        int temperatureSetCount() {
+            return temperatureSetCount;
         }
 
         @Override
@@ -474,6 +494,18 @@ class AgentClientSessionHistoryTest {
         public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
                              Boolean requestThinkingEnabled) {
             capturedThinking.add(requestThinkingEnabled);
+            capturedTemperatures.add(temperature);
+            return new LLMResult(result -> {
+                result.addAppendedMessage(Message.fromAssistant("ok"));
+                result.complete("ok");
+            });
+        }
+
+        @Override
+        public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
+                             Boolean requestThinkingEnabled, Double requestTemperature) {
+            capturedThinking.add(requestThinkingEnabled);
+            capturedTemperatures.add(requestTemperature);
             return new LLMResult(result -> {
                 result.addAppendedMessage(Message.fromAssistant("ok"));
                 result.complete("ok");
@@ -489,6 +521,17 @@ class AgentClientSessionHistoryTest {
         @Override
         public Boolean getThinkingEnabled() {
             return thinkingEnabled;
+        }
+
+        @Override
+        public void setTemperature(Double temperature) {
+            this.temperature = temperature;
+            temperatureSetCount++;
+        }
+
+        @Override
+        public Double getTemperature() {
+            return temperature;
         }
     }
 

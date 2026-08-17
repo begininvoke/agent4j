@@ -44,6 +44,7 @@ public class AnthropicModel implements LLMModel {
     private final Map<String, Tool> toolMap = new ConcurrentHashMap<>();
     private boolean requestDebugEnabled;
     private Boolean thinkingEnabled;
+    private Double temperature;
 
     /**
      * 构造Anthropic模型实例.
@@ -62,11 +63,17 @@ public class AnthropicModel implements LLMModel {
 
     public AnthropicModel(String baseUrl, String modelName, String apiKey,
                           boolean requestDebugEnabled, Boolean thinkingEnabled) {
+        this(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled, null);
+    }
+
+    public AnthropicModel(String baseUrl, String modelName, String apiKey,
+                          boolean requestDebugEnabled, Boolean thinkingEnabled, Double temperature) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.modelName = modelName;
         this.apiKey = apiKey;
         this.requestDebugEnabled = requestDebugEnabled;
         this.thinkingEnabled = thinkingEnabled;
+        this.temperature = temperature;
         this.client = new OkHttpClient.Builder()
                 .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
@@ -94,6 +101,16 @@ public class AnthropicModel implements LLMModel {
         return thinkingEnabled;
     }
 
+    @Override
+    public void setTemperature(Double temperature) {
+        this.temperature = temperature;
+    }
+
+    @Override
+    public Double getTemperature() {
+        return temperature;
+    }
+
     /** {@inheritDoc} */
     @Override
     public LLMResult ask(Message message) {
@@ -119,13 +136,20 @@ public class AnthropicModel implements LLMModel {
     /** {@inheritDoc} */
     @Override
     public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
-        return ask(messages, tools, toolExecutor, thinkingEnabled);
+        return ask(messages, tools, toolExecutor, thinkingEnabled, temperature);
     }
 
     /** {@inheritDoc} */
     @Override
     public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
                          Boolean requestThinkingEnabled) {
+        return ask(messages, tools, toolExecutor, requestThinkingEnabled, temperature);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public LLMResult ask(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor,
+                         Boolean requestThinkingEnabled, Double requestTemperature) {
         List<ToolDescriptor> descriptors = new ArrayList<>();
         for (Tool tool : tools) {
             ToolDescriptor desc = ToolDescriptor.fromTool(tool);
@@ -134,7 +158,7 @@ public class AnthropicModel implements LLMModel {
         }
 
         return new LLMResult(r -> executeAgentLoop(r, new ArrayList<>(messages), descriptors,
-                toolExecutor, requestThinkingEnabled));
+                toolExecutor, requestThinkingEnabled, requestTemperature));
     }
 
     /**
@@ -142,9 +166,9 @@ public class AnthropicModel implements LLMModel {
      */
     private void executeAgentLoop(LLMResult result, List<Message> messages,
                                    List<ToolDescriptor> tools, ToolExecutor toolExecutor,
-                                   Boolean requestThinkingEnabled) {
+                                   Boolean requestThinkingEnabled, Double requestTemperature) {
         try {
-            ObjectNode body = buildRequestBody(messages, tools, requestThinkingEnabled);
+            ObjectNode body = buildRequestBody(messages, tools, requestThinkingEnabled, requestTemperature);
             Request request = new Request.Builder()
                     .url(baseUrl + "/v1/messages")
                     .post(RequestBody.create(body.toString(), MediaType.parse("application/json")))
@@ -172,7 +196,8 @@ public class AnthropicModel implements LLMModel {
                         return;
                     }
                     if (shouldContinueWithToolCalls(stopReason, toolCalls)) {
-                        handleToolCallsAndContinue(result, messages, tools, toolExecutor, requestThinkingEnabled,
+                        handleToolCallsAndContinue(result, messages, tools, toolExecutor,
+                                requestThinkingEnabled, requestTemperature,
                                 contentBuffer.toString(), thinkBuffer.toString(),
                                 thinkSignatureBuffer.toString(), new ArrayList<>(toolCalls));
                     } else {
@@ -300,7 +325,7 @@ public class AnthropicModel implements LLMModel {
      */
     private void handleToolCallsAndContinue(LLMResult result, List<Message> messages,
                                              List<ToolDescriptor> tools, ToolExecutor toolExecutor,
-                                             Boolean requestThinkingEnabled,
+                                             Boolean requestThinkingEnabled, Double requestTemperature,
                                              String content, String think, String thinkSignature,
                                              List<ToolCallEntry> toolCalls) {
         try {
@@ -345,7 +370,8 @@ public class AnthropicModel implements LLMModel {
             }
 
             // 继续Agent循环
-            executeAgentLoop(result, messages, tools, toolExecutor, requestThinkingEnabled);
+            executeAgentLoop(result, messages, tools, toolExecutor,
+                    requestThinkingEnabled, requestTemperature);
         } catch (Exception e) {
             handleError(result, e);
         }
@@ -490,15 +516,23 @@ public class AnthropicModel implements LLMModel {
      * 构建Anthropic Messages请求体.
      */
     private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools) {
-        return buildRequestBody(messages, tools, thinkingEnabled);
+        return buildRequestBody(messages, tools, thinkingEnabled, temperature);
     }
 
     private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools,
                                         Boolean requestThinkingEnabled) {
+        return buildRequestBody(messages, tools, requestThinkingEnabled, temperature);
+    }
+
+    private ObjectNode buildRequestBody(List<Message> messages, List<ToolDescriptor> tools,
+                                        Boolean requestThinkingEnabled, Double requestTemperature) {
         ObjectNode body = MAPPER.createObjectNode();
         body.put("model", modelName);
         body.put("max_tokens", 4096);
         body.put("stream", true);
+        if (requestTemperature != null) {
+            body.put("temperature", requestTemperature);
+        }
 
         ArrayNode messagesArray = MAPPER.createArrayNode();
         for (Message msg : messages) {

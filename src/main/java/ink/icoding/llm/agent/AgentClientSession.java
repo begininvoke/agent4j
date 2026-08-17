@@ -57,6 +57,7 @@ public class AgentClientSession {
     private int contextSummaryTriggerTokens = DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS;
     private int contextSummaryTriggerRounds;
     private Boolean thinkingEnabled;
+    private Double temperature;
 
     /**
      * 构造会话实例.
@@ -188,20 +189,30 @@ public class AgentClientSession {
     }
 
     private LLMResult askModel(List<Message> messages, List<Tool> tools, ToolExecutor toolExecutor) {
-        if (thinkingEnabled == null) {
+        if (thinkingEnabled == null && temperature == null) {
             return agent.getModel().ask(messages, tools, toolExecutor);
         }
-        return agent.getModel().ask(messages, tools, toolExecutor, thinkingEnabled);
+        Boolean requestThinkingEnabled = thinkingEnabled != null
+                ? thinkingEnabled : agent.getModel().getThinkingEnabled();
+        Double requestTemperature = temperature != null
+                ? temperature : agent.getModel().getTemperature();
+        return agent.getModel().ask(messages, tools, toolExecutor,
+                requestThinkingEnabled, requestTemperature);
     }
 
     private LLMResult askModel(List<Message> messages, List<Tool> tools) {
-        if (thinkingEnabled == null) {
+        if (thinkingEnabled == null && temperature == null) {
             return agent.getModel().ask(messages, tools);
         }
         ToolExecutor noToolExecutor = (toolName, paramJson, descriptor, handler) -> {
             throw new IllegalStateException("No tools are available for this LLM call");
         };
-        return agent.getModel().ask(messages, tools, noToolExecutor, thinkingEnabled);
+        Boolean requestThinkingEnabled = thinkingEnabled != null
+                ? thinkingEnabled : agent.getModel().getThinkingEnabled();
+        Double requestTemperature = temperature != null
+                ? temperature : agent.getModel().getTemperature();
+        return agent.getModel().ask(messages, tools, noToolExecutor,
+                requestThinkingEnabled, requestTemperature);
     }
 
     /**
@@ -363,6 +374,7 @@ public class AgentClientSession {
         // 子Agent继承父Agent的模型、工具和技能
         subAgent.setLlmRequestDebugEnabled(agent.isLlmRequestDebugEnabled());
         subAgent.setThinkingEnabled(agent.getThinkingEnabled());
+        subAgent.setTemperature(agent.getTemperature());
         subAgent.setModel(agent.getModel());
         subAgent.getTools().addAll(agent.getTools());
         subAgent.getSkills().addAll(agent.getSkills());
@@ -377,6 +389,7 @@ public class AgentClientSession {
         try {
             AgentClientSession subSession = subAgent.createSession();
             subSession.setThinkingEnabled(thinkingEnabled);
+            subSession.setTemperature(temperature);
             AgentSessionResult subResult = subSession.command(task);
             subResult.then(new AgentResultHandler() {
                 @Override
@@ -707,6 +720,7 @@ public class AgentClientSession {
             data.setContextSummaryTriggerTokens(contextSummaryTriggerTokens);
             data.setContextSummaryTriggerRounds(contextSummaryTriggerRounds);
             data.setThinkingEnabled(thinkingEnabled);
+            data.setTemperature(temperature);
             data.setSubAgents(subAgents.stream()
                     .map(AgentClient::getName)
                     .collect(Collectors.toList()));
@@ -736,6 +750,7 @@ public class AgentClientSession {
             session.contextSummaryTriggerTokens = data.getContextSummaryTriggerTokens();
             session.contextSummaryTriggerRounds = data.getContextSummaryTriggerRounds();
             session.thinkingEnabled = data.getThinkingEnabled();
+            session.temperature = data.getTemperature();
             return session;
         } catch (JsonProcessingException e) {
             throw new RuntimeException("Failed to deserialize session", e);
@@ -790,6 +805,15 @@ public class AgentClientSession {
     /** 仅对当前Session关闭思考 */
     public AgentClientSession disableThinking() { return setThinkingEnabled(false); }
 
+    /** 获取当前Session级温度; null表示使用Agent/底层模型默认设置 */
+    public Double getTemperature() { return temperature; }
+
+    /** 设置当前Session级温度; null表示使用Agent/底层模型默认设置 */
+    public AgentClientSession setTemperature(Double temperature) {
+        this.temperature = temperature;
+        return this;
+    }
+
     /**
      * 序列化数据内部类.
      */
@@ -802,6 +826,7 @@ public class AgentClientSession {
         private int contextSummaryTriggerTokens = DEFAULT_CONTEXT_SUMMARY_TRIGGER_TOKENS;
         private int contextSummaryTriggerRounds;
         private Boolean thinkingEnabled;
+        private Double temperature;
 
         public List<Message> getHistory() { return history; }
         public void setHistory(List<Message> history) { this.history = history; }
@@ -819,5 +844,7 @@ public class AgentClientSession {
         public void setContextSummaryTriggerRounds(int contextSummaryTriggerRounds) { this.contextSummaryTriggerRounds = contextSummaryTriggerRounds; }
         public Boolean getThinkingEnabled() { return thinkingEnabled; }
         public void setThinkingEnabled(Boolean thinkingEnabled) { this.thinkingEnabled = thinkingEnabled; }
+        public Double getTemperature() { return temperature; }
+        public void setTemperature(Double temperature) { this.temperature = temperature; }
     }
 }

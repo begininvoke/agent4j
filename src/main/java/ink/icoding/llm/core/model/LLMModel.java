@@ -59,10 +59,27 @@ public interface LLMModel {
      */
     static LLMModel create(ModelType type, String baseUrl, String modelName, String apiKey,
                            boolean requestDebugEnabled, Boolean thinkingEnabled) {
+        return create(type, baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled, null);
+    }
+
+    /**
+     * 工厂方法, 根据模型类型创建对应的LLM实例.
+     *
+     * @param type                模型类型枚举
+     * @param baseUrl             API基础地址
+     * @param modelName           模型名称
+     * @param apiKey              API密钥
+     * @param requestDebugEnabled 是否输出LLM请求DEBUG日志
+     * @param thinkingEnabled     是否开启模型思考; null表示不干预模型默认行为
+     * @param temperature         模型温度; null表示不向服务端传递温度配置
+     * @return 对应类型的LLMModel实例
+     */
+    static LLMModel create(ModelType type, String baseUrl, String modelName, String apiKey,
+                           boolean requestDebugEnabled, Boolean thinkingEnabled, Double temperature) {
         return switch (type) {
-            case OpenAI -> new OpenAIChatModel(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled);
-            case Anthropic -> new AnthropicModel(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled);
-            case OpenAIResponse -> new OpenAIResponseModel(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled);
+            case OpenAI -> new OpenAIChatModel(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled, temperature);
+            case Anthropic -> new AnthropicModel(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled, temperature);
+            case OpenAIResponse -> new OpenAIResponseModel(baseUrl, modelName, apiKey, requestDebugEnabled, thinkingEnabled, temperature);
         };
     }
 
@@ -93,6 +110,12 @@ public interface LLMModel {
      * @return 是否开启; null表示不干预模型默认行为
      */
     default Boolean getThinkingEnabled() { return null; }
+
+    /** 设置模型默认温度; null表示不向服务端传递温度配置. */
+    default void setTemperature(Double temperature) {}
+
+    /** 获取模型默认温度; null表示不向服务端传递温度配置. */
+    default Double getTemperature() { return null; }
 
     /**
      * 发送单条消息并返回结果.
@@ -145,5 +168,15 @@ public interface LLMModel {
                           ink.icoding.llm.core.tool.ToolExecutor toolExecutor,
                           Boolean thinkingEnabled) {
         return ask(messages, tools, toolExecutor);
+    }
+
+    /**
+     * 使用调用级思考开关和温度发送消息.
+     * <p>实现类应直接使用参数构建本次请求, 不读取或修改模型实例上的对应配置.</p>
+     */
+    default LLMResult ask(List<Message> messages, List<Tool> tools,
+                          ink.icoding.llm.core.tool.ToolExecutor toolExecutor,
+                          Boolean thinkingEnabled, Double temperature) {
+        return ask(messages, tools, toolExecutor, thinkingEnabled);
     }
 }
