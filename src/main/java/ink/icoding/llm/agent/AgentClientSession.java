@@ -31,7 +31,7 @@ import java.util.stream.Collectors;
  * session.command("帮我分析这段代码")
  *     .then(new AgentResultHandler() {
  *         public void onMessage(String msg) { System.out.print(msg); }
- *         public void onTool(ToolDescriptor tool, ToolStatus status) { ... }
+ *         public void onTool(ToolDescriptor tool, ToolStatus status, Object result) { ... }
  *         public void onPlanCreated(Plan plan) { ... }
  *         public void onPlanStepStart(Plan plan, int cur, int total, String step) { ... }
  *     })
@@ -129,9 +129,9 @@ public class AgentClientSession {
                 }
 
                 @Override
-                public void onTool(ToolDescriptor tool, ToolStatus status) {
+                public void onTool(ToolDescriptor tool, ToolStatus status, Object toolResult) {
                     if (result.getHandler() != null) {
-                        result.getHandler().onTool(tool, status);
+                        result.getHandler().onTool(tool, status, toolResult);
                     }
                 }
 
@@ -294,8 +294,8 @@ public class AgentClientSession {
                     }
 
                     @Override
-                    public void onTool(ToolDescriptor tool, ToolStatus status) {
-                        if (agentHandler != null) agentHandler.onPlanStepTool(plan, tool, status);
+                    public void onTool(ToolDescriptor tool, ToolStatus status, Object toolResult) {
+                        if (agentHandler != null) agentHandler.onPlanStepTool(plan, tool, status, toolResult);
                     }
 
                     @Override
@@ -403,8 +403,8 @@ public class AgentClientSession {
                 }
 
                 @Override
-                public void onTool(ToolDescriptor tool, ToolStatus status) {
-                    if (agentHandler != null) agentHandler.onTool(tool, status);
+                public void onTool(ToolDescriptor tool, ToolStatus status, Object toolResult) {
+                    if (agentHandler != null) agentHandler.onTool(tool, status, toolResult);
                 }
 
                 @Override

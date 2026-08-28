@@ -81,6 +81,18 @@ public interface AgentResultHandler extends ResultHandler {
     default void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status) {}
 
     /**
+     * 当计划步骤中的工具调用状态变化时回调, 并携带工具执行结果.
+     *
+     * @param plan   所属计划
+     * @param tool   工具描述对象
+     * @param status 工具调用状态
+     * @param result 工具执行结果; 尚未完成时为 {@code null}
+     */
+    default void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status, Object result) {
+        onPlanStepTool(plan, tool, status);
+    }
+
+    /**
      * 当计划中的某个步骤执行出错时回调.
      *
      * @param plan    所属计划

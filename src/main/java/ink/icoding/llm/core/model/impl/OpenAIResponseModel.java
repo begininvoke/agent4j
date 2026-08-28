@@ -375,7 +375,7 @@ public class OpenAIResponseModel implements LLMModel {
         ResultHandler handler = result.getHandler();
         if (handler != null) {
             entry.preparingNotified = true;
-            handler.onTool(descriptor, ToolStatus.PREPARING);
+            handler.onTool(descriptor, ToolStatus.PREPARING, null);
         }
     }
 
@@ -561,9 +561,9 @@ public class OpenAIResponseModel implements LLMModel {
             }
 
             @Override
-            public void onTool(ToolDescriptor tool, ToolStatus status) {
+            public void onTool(ToolDescriptor tool, ToolStatus status, Object toolResult) {
                 if (status != ToolStatus.PREPARING) {
-                    handler.onTool(tool, status);
+                    handler.onTool(tool, status, toolResult);
                 }
             }
 

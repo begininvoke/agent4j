@@ -69,7 +69,7 @@ Agent4j 是一个轻量级 Java 框架，让你只需几行代码就能构建**�
 <dependency>
     <groupId>ink.icoding.llm</groupId>
     <artifactId>agent4j</artifactId>
-    <version>2.3.6</version>
+    <version>2.3.7</version>
 </dependency>
 ```
 
@@ -158,7 +158,7 @@ AgentClient                         # 智能体定义（名称、模型、工具
         │           +-- ResultHandler 回调：
         │                 - onMessage(text)      # 流式文本
         │                 - onThink(text)        # 思考/推理过程
-        │                 - onTool(tool, status) # 工具调用生命周期
+        │                 - onTool(tool, status, result) # 工具调用生命周期及结果
         │
         +-- Plan（内置工具）          # 将任务拆分为步骤，逐步执行
         +-- Sub-Agent（内置工具）     # 派生子智能体处理独立子任务
@@ -259,8 +259,8 @@ session.command(task).then(new AgentResultHandler() {
     // LLM 流式输出思考/推理过程
     public void onThink(String think) { }
 
-    // 工具生命周期：PREPARING → CALLING → COMPLETED
-    public void onTool(ToolDescriptor tool, ToolStatus status) { }
+    // 工具生命周期：PREPARING → CALLING → COMPLETED；仅 COMPLETED 时 result 非 null
+    public void onTool(ToolDescriptor tool, ToolStatus status, Object result) { }
 
     // LLM 创建了一个计划
     public void onPlanCreated(Plan plan) { }
@@ -275,7 +275,7 @@ session.command(task).then(new AgentResultHandler() {
     public void onPlanStepComplete(Plan plan, int current, int total, String step, String result) { }
 
     // 计划步骤执行过程中的工具调用
-    public void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status) { }
+    public void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status, Object result) { }
 
     // 计划的某个步骤执行失败
     public void onPlanStepError(Plan plan, int current, int total, String step, Exception error) { }

@@ -69,7 +69,7 @@ Agent4j is a lightweight Java framework that lets you build **autonomous AI agen
 <dependency>
     <groupId>ink.icoding.llm</groupId>
     <artifactId>agent4j</artifactId>
-    <version>2.3.6</version>
+    <version>2.3.7</version>
 </dependency>
 ```
 
@@ -91,7 +91,7 @@ agent.createSession()
     .command("List all Java files in the current directory")
     .then(new AgentResultHandler() {
         public void onMessage(String msg) { System.out.print(msg); }
-        public void onTool(ToolDescriptor tool, ToolStatus status) {
+        public void onTool(ToolDescriptor tool, ToolStatus status, Object result) {
             System.out.println("[" + status + "] " + tool.getName());
         }
     })
@@ -192,7 +192,7 @@ AgentClient                         # Agent definition (name, model, tools, skil
         |           +-- ResultHandler callbacks:
         |                 - onMessage(text)    # Streaming text
         |                 - onThink(text)      # Reasoning/thinking
-        |                 - onTool(tool, status) # Tool call lifecycle
+        |                 - onTool(tool, status, result) # Tool lifecycle and result
         |
         +-- Plan (built-in tool)    # Break task into steps, execute sequentially
         +-- Sub-Agent (built-in)    # Spawn child agent for independent sub-tasks
@@ -293,8 +293,8 @@ session.command(task).then(new AgentResultHandler() {
     // LLM streams reasoning/thinking
     public void onThink(String think) { }
 
-    // Tool lifecycle: PREPARING → CALLING → COMPLETED
-    public void onTool(ToolDescriptor tool, ToolStatus status) { }
+    // Tool lifecycle: PREPARING → CALLING → COMPLETED; result is non-null only for COMPLETED
+    public void onTool(ToolDescriptor tool, ToolStatus status, Object result) { }
 
     // A plan was created by the LLM
     public void onPlanCreated(Plan plan) { }
@@ -309,7 +309,7 @@ session.command(task).then(new AgentResultHandler() {
     public void onPlanStepComplete(Plan plan, int current, int total, String step, String result) { }
 
     // Tool call during a plan step
-    public void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status) { }
+    public void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status, Object result) { }
 
     // A plan step failed
     public void onPlanStepError(Plan plan, int current, int total, String step, Exception error) { }

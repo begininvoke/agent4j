@@ -460,7 +460,7 @@ public class AnthropicModel implements LLMModel {
         descriptor.setCallId(callId);
         ResultHandler handler = result.getHandler();
         if (handler != null) {
-            handler.onTool(descriptor, ToolStatus.PREPARING);
+            handler.onTool(descriptor, ToolStatus.PREPARING, null);
         }
     }
 
@@ -480,9 +480,9 @@ public class AnthropicModel implements LLMModel {
             }
 
             @Override
-            public void onTool(ToolDescriptor tool, ToolStatus status) {
+            public void onTool(ToolDescriptor tool, ToolStatus status, Object toolResult) {
                 if (status != ToolStatus.PREPARING) {
-                    handler.onTool(tool, status);
+                    handler.onTool(tool, status, toolResult);
                 }
             }
 

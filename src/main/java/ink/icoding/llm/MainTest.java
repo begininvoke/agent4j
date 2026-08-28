@@ -71,7 +71,7 @@ public class MainTest {
             }
 
             @Override
-            public void onTool(ToolDescriptor tool, ToolStatus status) {
+            public void onTool(ToolDescriptor tool, ToolStatus status, Object result) {
                 switch (status) {
                     case PREPARING -> {
                         System.out.println("\n[工具准备] " + tool.getName());
@@ -80,7 +80,7 @@ public class MainTest {
                         }
                     }
                     case CALLING -> System.out.println("[工具调用中] " + tool.getName());
-                    case COMPLETED -> System.out.println("[工具完成] " + tool.getName());
+                    case COMPLETED -> System.out.println("[工具完成] " + tool.getName() + ": " + result);
                 }
             }
 
@@ -110,11 +110,11 @@ public class MainTest {
             }
 
             @Override
-            public void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status) {
+            public void onPlanStepTool(Plan plan, ToolDescriptor tool, ToolStatus status, Object result) {
                 switch (status) {
                     case PREPARING -> System.out.println("    [计划工具准备] " + tool.getName());
                     case CALLING -> System.out.println("    [计划工具调用中] " + tool.getName());
-                    case COMPLETED -> System.out.println("    [计划工具完成] " + tool.getName());
+                    case COMPLETED -> System.out.println("    [计划工具完成] " + tool.getName() + ": " + result);
                 }
             }
 

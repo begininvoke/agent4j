@@ -32,11 +32,11 @@ public interface ToolExecutor {
     @SuppressWarnings("unchecked")
     static String defaultExecute(Tool<?> tool, String paramJson, ToolDescriptor descriptor, ink.icoding.llm.core.model.ResultHandler handler) {
         try {
-            if (handler != null) handler.onTool(descriptor, ToolStatus.PREPARING);
-            if (handler != null) handler.onTool(descriptor, ToolStatus.CALLING);
+            if (handler != null) handler.onTool(descriptor, ToolStatus.PREPARING, null);
+            if (handler != null) handler.onTool(descriptor, ToolStatus.CALLING, null);
             Tool<ToolParam> typedTool = (Tool<ToolParam>) tool;
             String result = typedTool.execute(ToolParam.fromJsonString(paramJson, descriptor.getParamClass()));
-            if (handler != null) handler.onTool(descriptor, ToolStatus.COMPLETED);
+            if (handler != null) handler.onTool(descriptor, ToolStatus.COMPLETED, result);
             return result;
         } catch (Exception e) {
             return handleToolError(descriptor, handler, e);

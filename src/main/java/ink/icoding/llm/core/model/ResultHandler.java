@@ -34,6 +34,20 @@ public interface ResultHandler {
     default void onTool(ToolDescriptor tool, ToolStatus status) {}
 
     /**
+     * 当工具调用状态变化时回调, 并携带工具执行结果.
+     * <p>当状态为 {@link ToolStatus#COMPLETED} 时, {@code result} 为工具执行结果;
+     * 其他状态下为 {@code null}.</p>
+     * <p>默认委托给两参数版本, 以保持对现有实现的兼容.</p>
+     *
+     * @param tool   工具描述对象
+     * @param status 工具调用状态
+     * @param result 工具执行结果; 尚未完成时为 {@code null}
+     */
+    default void onTool(ToolDescriptor tool, ToolStatus status, Object result) {
+        onTool(tool, status);
+    }
+
+    /**
      * 当工具执行发生异常时回调.
      *
      * @param tool  工具描述对象
